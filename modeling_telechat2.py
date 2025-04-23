@@ -1,4 +1,3 @@
-
 # coding=utf-8
 # Copyright 2022 HuggingFace Inc. team and BigScience workshop.
 #
@@ -34,33 +33,33 @@
 # limitations under the License.
 
 
-
-
 """PyTorch TELECHAT model."""
 
 import warnings
-from typing import Optional, Tuple, Union
+from typing import Optional, Tuple, Union, List, Dict
+from threading import Thread
 
 import torch
 import math
+import copy
 from torch import nn
 import torch.utils.checkpoint
 from torch.nn import functional as F
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, LayerNorm, MSELoss
 from transformers.modeling_outputs import (
-    # BaseModelOutputWithPastAndCrossAttentions,
-    MoeModelOutputWithPast,
-    CausalLMOutputWithPast
+    BaseModelOutputWithPastAndCrossAttentions,
+    CausalLMOutputWithCrossAttentions
 )
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
+from transformers import GenerationConfig
 
-from .configuration_telechatmoe import TelechatMOEConfig as TelechatConfig
+from .configuration_telechat2 import Telechat2Config
 
 logger = logging.get_logger(__name__)
 
 _CHECKPOINT_FOR_DOC = "telechat"
-_CONFIG_FOR_DOC = "TelechatConfig"
+_CONFIG_FOR_DOC = "Telechat2Config"
 
 TELECHAT_PRETRAINED_MODEL_ARCHIVE_LIST = []
 
@@ -79,92 +78,9 @@ except ImportError:
         flash_attn_unpadded_func = None
 
 
-def load_balancing_loss_func(
-    gate_logits: Union[torch.Tensor, Tuple[torch.Tensor], None],
-    num_experts: Optional[int] = None,
-    top_k=2,
-    attention_mask: Optional[torch.Tensor] = None,
-) -> Union[torch.Tensor, int]:
-    r"""
-    Computes auxiliary load balancing loss as in Switch Transformer - implemented in Pytorch.
-
-    See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details. This function implements the loss
-    function presented in equations (4) - (6) of the paper. It aims at penalizing cases where the routing between
-    experts is too unbalanced.
-
-    Args:
-        gate_logits:
-            Logits from the `gate`, should be a tuple of model.config.num_hidden_layers tensors of
-            shape [batch_size X sequence_length, num_experts].
-        num_experts:
-            Number of experts
-        top_k:
-            The number of experts to route per-token, can be also interpreted as the `top-k` routing
-            parameter.
-        attention_mask (`torch.Tensor`, *optional*):
-            The attention_mask used in forward function
-            shape [batch_size X sequence_length] if not None.
-
-    Returns:
-        The auxiliary loss.
-    """
-    if gate_logits is None or not isinstance(gate_logits, tuple):
-        return 0
-
-    if isinstance(gate_logits, tuple):
-        compute_device = gate_logits[0].device
-        concatenated_gate_logits = torch.cat([layer_gate.to(compute_device) for layer_gate in gate_logits], dim=0)
-
-    routing_weights = torch.nn.functional.softmax(concatenated_gate_logits, dim=-1)
-
-    _, selected_experts = torch.topk(routing_weights, top_k, dim=-1)
-
-    expert_mask = torch.nn.functional.one_hot(selected_experts, num_experts)
-
-    if attention_mask is None:
-        # Compute the percentage of tokens routed to each experts
-        tokens_per_expert = torch.mean(expert_mask.float(), dim=0)
-
-        # Compute the average probability of routing to these experts
-        router_prob_per_expert = torch.mean(routing_weights, dim=0)
-    else:
-        batch_size, sequence_length = attention_mask.shape
-        num_hidden_layers = concatenated_gate_logits.shape[0] // (batch_size * sequence_length)
-
-        # Compute the mask that masks all padding tokens as 0 with the same shape of expert_mask
-        expert_attention_mask = (
-            attention_mask[None, :, :, None, None]
-            .expand((num_hidden_layers, batch_size, sequence_length, top_k, num_experts))
-            .reshape(-1, top_k, num_experts)
-            .to(compute_device)
-        )
-
-        # Compute the percentage of tokens routed to each experts
-        tokens_per_expert = torch.sum(expert_mask.float() * expert_attention_mask, dim=0) / torch.sum(
-            expert_attention_mask, dim=0
-        )
-
-        # Compute the mask that masks all padding tokens as 0 with the same shape of tokens_per_expert
-        router_per_expert_attention_mask = (
-            attention_mask[None, :, :, None]
-            .expand((num_hidden_layers, batch_size, sequence_length, num_experts))
-            .reshape(-1, num_experts)
-            .to(compute_device)
-        )
-
-        # Compute the average probability of routing to these experts
-        router_prob_per_expert = torch.sum(routing_weights * router_per_expert_attention_mask, dim=0) / torch.sum(
-            router_per_expert_attention_mask, dim=0
-        )
-
-    overall_loss = torch.sum(tokens_per_expert * router_prob_per_expert.unsqueeze(0))
-    return overall_loss * num_experts
-
-
-
 class RotaryEmbedding(torch.nn.Module):
     # Extracted from: https://github.com/EleutherAI/gpt-neox
-    def __init__(self, dim ,config, base=10000, precision=torch.half):
+    def __init__(self, dim, config, base=10000, precision=torch.bfloat16):
         super().__init__()
         self.config = config
         self.dim = dim
@@ -175,7 +91,7 @@ class RotaryEmbedding(torch.nn.Module):
         self.sin_cached = None
         self.precision = precision
 
-    def get_mscale(self,scale=1):
+    def get_mscale(self, scale=1):
         if scale <= 1:
             return 1.0
         return 0.1 * math.log(scale) + 1.0
@@ -195,7 +111,7 @@ class RotaryEmbedding(torch.nn.Module):
         self.mscale = float(self.get_mscale(seq_len / self.config.training_seqlen))
         if True:
             base = self.base * ntk_alpha ** (self.dim / (self.dim - 2))
-            self.inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2, device=x.device).float( )/ self.dim ))
+            self.inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2, device=x.device).float() / self.dim))
             self.max_seq_len_cached = seq_len
             t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
             freqs = torch.einsum('i,j->ij', t, self.inv_freq)
@@ -204,19 +120,19 @@ class RotaryEmbedding(torch.nn.Module):
             if self.precision == torch.bfloat16:
                 emb = emb.float()
             # [sx, 1 (b * np), hn]
-            self.cos_cached = self.mscale *emb.cos()[:, None, :].half()
-            self.sin_cached = self.mscale *emb.sin()[:, None, :].half()
+            self.cos_cached = self.mscale * emb.cos()[:, None, :].half()
+            self.sin_cached = self.mscale * emb.sin()[:, None, :].half()
             if self.precision == torch.bfloat16:
                 self.cos_cached = self.cos_cached.bfloat16()
                 self.sin_cached = self.sin_cached.bfloat16()
         return self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...]
 
 
-
 # rotary pos emb helpers:
 def rotate_half(x):
     x1, x2 = x[..., :x.shape[-1] // 2], x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=x1.ndim - 1)  # dim=-1 triggers a bug in earlier torch versions
+
 
 def apply_rotary_pos_emb_torch(q, k, cos, sin, offset: int = 0):  # jitting fails with bf16
     cos, sin = cos[offset:q.shape[0] + offset, ...], sin[offset:q.shape[0] + offset, ...]
@@ -266,6 +182,9 @@ class FlashSelfAttention(torch.nn.Module):
         ---------
             q, k, v: The tensor containing the query, key, and value. (B, S, H, D)
         """
+        q = q.bfloat16()
+        k = k.bfloat16()
+        v = v.bfloat16()
         assert all((i.dtype in [torch.float16, torch.bfloat16] for i in (q, k, v)))
         assert all((i.is_cuda for i in (q, k, v)))
 
@@ -275,7 +194,7 @@ class FlashSelfAttention(torch.nn.Module):
         q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
         cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
                                     device=q.device)
-        self.training = False
+        self.training = True
         if self.training:
             # during training q,k,v always have same seqlen
             assert seqlen_k == seqlen_q
@@ -297,9 +216,11 @@ class FlashSelfAttention(torch.nn.Module):
             softmax_scale=self.softmax_scale, causal=is_causal
         )
 
-        output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
-        return output
+        # output = output.float()
 
+        output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+
+        return output
 
 
 def _make_causal_mask(
@@ -330,7 +251,6 @@ def _expand_mask(mask: torch.Tensor, tgt_length: int) -> torch.BoolTensor:
 
     expanded_mask = ~(mask[:, None, None, :].to(torch.bool))
     return expanded_mask.expand(batch_size, 1, tgt_length, src_length)
-
 
 
 def dropout_add(x: torch.Tensor, residual: torch.Tensor, prob: float, training: bool) -> torch.Tensor:
@@ -415,7 +335,7 @@ class TelechatGelu(nn.Module):
 
 
 class TelechatAttention(nn.Module):
-    def __init__(self, config: TelechatConfig ,layer_idx):
+    def __init__(self, config: Telechat2Config, layer_idx):
         super().__init__()
         self.kv_cache = None
         self.layer_idx = layer_idx
@@ -437,26 +357,25 @@ class TelechatAttention(nn.Module):
         self.inv_norm_factor = 1.0 / math.sqrt(self.head_dim)
         self.beta = 1.0
 
-        self.num_key_value_heads = self.num_heads
-        kv_projection_size = self.head_dim * self.num_key_value_heads
+        self.num_key_value_heads = config.num_key_value_heads if config.num_key_value_heads else self.num_heads
+        self.kv_projection_size = self.head_dim * self.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.query = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
-        self.key_value = nn.Linear(self.hidden_size, kv_projection_size * 2, bias=False)
+        self.key_value = nn.Linear(self.hidden_size, self.kv_projection_size * 2, bias=False)
         self.dense = nn.Linear(self.hidden_size, self.hidden_size)
         self.attention_dropout = nn.Dropout(config.attention_dropout)
         if self.config.flash_attn:
-            self.rotary_emb = RotaryEmbedding(self.head_dim ,config=config, precision=torch.bfloat16)
+            self.rotary_emb = RotaryEmbedding(self.head_dim, config=config, precision=torch.bfloat16)
         else:
-            self.rotary_emb = RotaryEmbedding(self.head_dim ,config=config)
+            self.rotary_emb = RotaryEmbedding(self.head_dim, config=config)
 
         self.core_attention_flash = FlashSelfAttention(
             causal=True, attention_dropout=config.attention_dropout
         )
 
         self.last_key_layer = None
-        #logn_list = [math.log(i, 4096) if i > 4096 else 1 for i in range(1, 32768)]
-        #self.logn_tensor = torch.tensor(logn_list)[None, :, None, None].half().cuda()
-
+        # logn_list = [math.log(i, 4096) if i > 4096 else 1 for i in range(1, 32768)]
+        # self.logn_tensor = torch.tensor(logn_list)[None, :, None, None].half().cuda()
 
     def repeat_kv(self, hidden_states, n_rep):
         slen, batch, num_key_value_heads_per_partition, head_dim = hidden_states.shape
@@ -516,48 +435,61 @@ class TelechatAttention(nn.Module):
         output_size = (query_layer.size(1),
                        query_layer.size(2),
                        query_layer.size(0),
-                       key_layer.size(0))
+                       key_layer.size(0),
+                       key_layer.size(2)
+                       )
 
         query_layer = query_layer.view(output_size[2], output_size[0] * output_size[1], -1)
-        key_layer = key_layer.view(output_size[3], output_size[0] * output_size[1], -1)
+        key_layer = key_layer.view(output_size[3], output_size[0] * output_size[4], -1)
 
         apply_rotary_fn = apply_rotary_pos_emb_torch
 
         seq_len = key_layer.shape[0]
         offset = 0
 
-        if  use_cache and layer_past != None:
-            past_key, past_value  = layer_past
+        if use_cache and layer_past != None:
+            past_key, past_value = layer_past
             offset = past_key.shape[0]
             seq_len += offset
 
         cos, sin = self.rotary_emb(value_layer, seq_len=seq_len)
 
+
+
         query_layer, key_layer = apply_rotary_fn(query_layer, key_layer, cos, sin, offset=offset)
+
         if use_cache:
             if layer_past != None:
                 past_key, past_value = layer_past
-                key_layer = torch.cat((past_key, key_layer[-1, ...].unsqueeze(0)) ,dim=0)
-                value_layer = torch.cat((past_value ,value_layer[-1 ,...].unsqueeze(0)) ,dim = 0)
-            layer_past = key_layer ,value_layer
-        s, bz, head, dim = value_layer.shape
+                key_layer = torch.cat((past_key, key_layer[-1, ...].unsqueeze(0)), dim=0)
+                value_layer = torch.cat((past_value, value_layer[-1, ...].unsqueeze(0)), dim=0)
+            layer_past = key_layer, value_layer
+
+        s_value, bz, kv_head, dim = value_layer.shape
         s_key = key_layer.shape[0]
         s_query = query_layer.shape[0]
-        query_layer = query_layer.reshape((s_query, bz, head, dim))
-        key_layer = key_layer.reshape((s_key, bz, head, dim))
+        q_head = output_size[1]
 
+        query_layer = query_layer.reshape((s_query, bz, q_head, dim))
+        key_layer = key_layer.reshape((s_key, bz, kv_head, dim))
+
+        key_layer = self.repeat_kv(key_layer, self.num_key_value_groups)
+        value_layer = self.repeat_kv(value_layer, self.num_key_value_groups)
 
         if self.config.flash_attn:
             q, k, v = [rearrange(x, 's b ... -> b s ...').contiguous() for x in
                        (query_layer, key_layer, value_layer)]
+
             context_layer = self.core_attention_flash(q, k, v)
             context_layer = rearrange(context_layer, 'b s h d -> b s (h d)').contiguous()
         else:
+            assert 1==0
             ##[sq, b, np, hn] -> [sq, b * np, hn]
-            query_layer = query_layer.reshape(s_query ,bz * self.num_heads, dim)
+            query_layer = query_layer.reshape(s_query, bz * self.num_heads, dim)
             # [sk, b, np, hn] -> [sk, b * np, hn]
             key_layer = key_layer.reshape(s_key, bz * self.num_heads, dim)
-            matmul_result = self.inv_norm_factor * torch.einsum('bik,bkj->bij', query_layer.transpose(0, 1), key_layer.transpose(0, 1).transpose(1, 2))
+            matmul_result = self.inv_norm_factor * torch.einsum('bik,bkj->bij', query_layer.transpose(0, 1),
+                                                                key_layer.transpose(0, 1).transpose(1, 2))
 
             attention_scores = matmul_result.view(bz, self.num_heads, s_query, s_key)
 
@@ -569,11 +501,16 @@ class TelechatAttention(nn.Module):
             attention_probs = self.attention_dropout(attention_probs)
             attention_probs_reshaped = attention_probs.view(bz * self.num_heads, s_query, s_key)
 
-            value_layer = value_layer.reshape(s_key ,bz * self.num_heads, dim)
+            value_layer = value_layer.reshape(s_key, bz * self.num_heads, dim)
             context_layer = torch.bmm(attention_probs_reshaped, value_layer.transpose(0, 1))
             context_layer = self._merge_heads(context_layer)
 
+        # print(self.dense.weight.dtype, context_layer.dtype)
+        # assert 1==0
+
         output_tensor = self.dense(context_layer)
+
+
 
         output_tensor = dropout_add(output_tensor, residual, self.hidden_dropout, self.training)
         present = None
@@ -583,116 +520,69 @@ class TelechatAttention(nn.Module):
 
         return output_tensor, layer_past
 
-# class TelechatMLP(nn.Module):
-#     def __init__(self, config: TelechatConfig):
-#         super().__init__()
-#         hidden_size = config.hidden_size
-#         self.gate_proj = nn.Linear(hidden_size, config.ffn_hidden_size, bias=False)
-#         self.up_proj = nn.Linear(hidden_size, config.ffn_hidden_size, bias=False)
-#         self.down_proj = nn.Linear(config.ffn_hidden_size, hidden_size, bias=True)
-#         self.hidden_dropout = config.hidden_dropout
-#
-#     def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-#         intermediate_output = self.down_proj(F.silu(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
-#         output = dropout_add(intermediate_output, residual, self.hidden_dropout, self.training)
-#         return output
 
-class TelechatExpertMLP(nn.Module):
-    def __init__(self, config: TelechatConfig):
+class TelechatMLP(nn.Module):
+    def __init__(self, config: Telechat2Config):
         super().__init__()
         hidden_size = config.hidden_size
         self.gate_proj = nn.Linear(hidden_size, config.ffn_hidden_size, bias=False)
         self.up_proj = nn.Linear(hidden_size, config.ffn_hidden_size, bias=False)
         self.down_proj = nn.Linear(config.ffn_hidden_size, hidden_size, bias=True)
-        self.act_fn = F.silu
+        self.hidden_dropout = config.hidden_dropout
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        intermediate_output = self.down_proj(
-            self.act_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states)
-        )
+        intermediate_output = self.down_proj(F.silu(self.gate_proj(hidden_states)) * self.up_proj(hidden_states))
         return intermediate_output
 
 
-class TelechatSparseMoeBlock(nn.Module):
-    def __init__(self, config):
+class SwitchMLP(nn.Module):
+    def __init__(self, config: Telechat2Config):
         super().__init__()
+        self.num_expert = config.num_expert
         self.hidden_size = config.hidden_size
-        self.ffn_hidden_size = config.ffn_hidden_size
-        self.num_experts = config.num_local_experts
-        self.top_k = config.num_experts_per_tok
-        self.hidden_dropout = config.hidden_dropout
+        self.top_k = config.expert_chosen
+        self.router = nn.Linear(self.hidden_size, self.num_expert, bias=False, dtype=torch.float32)
+        self.local_experts = nn.ModuleList()
+        for i in range(self.num_expert):
+            self.local_experts.append(TelechatMLP(config))
+        self.training = False
+        self.hidden_dropout = 0.0
 
-        # gating
-        self.gate = nn.Linear(self.hidden_size, self.num_experts, bias=False)
+    def forward(self, hidden_states, residual):
+        b = hidden_states.size(0)
+        s = hidden_states.size(1)
+        h = hidden_states.size(2)
+        route = self.router(hidden_states)
+        topk_weights, topk_ind = torch.topk(route, self.top_k,
+                                            dim=-1)  ##[33,2]. max_ind:[[7,3],[7,2],...]; topk_weight: [[0.4,0.6],[0.5,0.5],...]
+        topk_weights = torch.softmax(topk_weights, dim=-1, dtype=torch.float32).type_as(hidden_states)
+        hidden_states = hidden_states.view(-1, hidden_states.size(2))
+        topk_weights = topk_weights.view(-1, topk_weights.size(2))
+        topk_ind = topk_ind.view(-1, topk_ind.size(2))
+        output_total = torch.zeros_like(hidden_states).to(hidden_states)
+        for expert_num, expert in enumerate(self.local_experts):
+            sample_ind, expert_ind = torch.where(topk_ind == expert_num)
+            hidden = hidden_states[sample_ind.unsqueeze(1), :]  ###[chosen_seqlen,1,3072]
+            expert_output = expert(hidden)
+            output_total[sample_ind] += torch.mul(expert_output.squeeze(1),
+                                                  topk_weights[sample_ind, expert_ind].unsqueeze(1))
+        output_total = output_total.view(b, s, h)
+        output = dropout_add(output_total, residual, self.hidden_dropout, self.training)
+        return output
 
-        self.experts = nn.ModuleList([TelechatExpertMLP(config) for _ in range(self.num_experts)])
-
-        # Jitter parameters
-        self.jitter_noise = config.router_jitter_noise if hasattr(config, 'router_jitter_noise') else 0.0
-
-    def forward(self, hidden_states: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
-        batch_size, sequence_length, hidden_dim = hidden_states.shape
-
-        # Apply jitter noise if training
-        if self.training and self.jitter_noise > 0:
-            hidden_states *= torch.empty_like(hidden_states).uniform_(
-                1.0 - self.jitter_noise, 1.0 + self.jitter_noise
-            )
-
-        # Reshape for expert processing
-        hidden_states = hidden_states.view(-1, hidden_dim)
-
-        # Router logic
-        router_logits = self.gate(hidden_states)
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
-        routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
-        routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
-        routing_weights = routing_weights.to(hidden_states.dtype)
-
-        # Initialize output
-        final_hidden_states = torch.zeros(
-            (batch_size * sequence_length, hidden_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device
-        )
-        print("in TelechatSparseMoeBlock, init final_hidden_states.shape", final_hidden_states.shape)
-
-        # Expert mask
-        expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
-
-        # Dispatch to experts
-        for expert_idx in range(self.num_experts):
-            expert_layer = self.experts[expert_idx]
-            idx, top_x = torch.where(expert_mask[expert_idx])
-
-            # if top_x.shape[0] == 0:
-            #     continue
-
-            current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-            current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
-
-            final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
-
-        # Reshape and add residual
-        final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
-        print("in TelechatSparseMoeBlock, return final_hidden_states", final_hidden_states.shape)
-        output = dropout_add(final_hidden_states, residual, self.hidden_dropout, self.training)
-
-        print("in TelechatSparseMoeBlock, return output, router_logits", output.shape, router_logits.shape)
-        return output, router_logits
 
 class TelechatBlock(nn.Module):
-    def __init__(self, config: TelechatConfig ,layer_idx):
+    def __init__(self, config: Telechat2Config, layer_idx):
         super().__init__()
         hidden_size = config.hidden_size
 
         self.input_layernorm = MixedFusedRMSNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.num_heads = config.n_head
         self.layer_idx = layer_idx
-        self.self_attention = TelechatAttention(config ,layer_idx)
+        self.self_attention = TelechatAttention(config, layer_idx)
         self.post_attention_layernorm = MixedFusedRMSNorm(hidden_size, eps=config.layer_norm_epsilon)
 
-        self.mlp = TelechatSparseMoeBlock(config)
+        self.mlp = SwitchMLP(config)
 
         self.apply_residual_connection_post_layernorm = config.apply_residual_connection_post_layernorm
         self.hidden_dropout = config.hidden_dropout
@@ -704,7 +594,6 @@ class TelechatBlock(nn.Module):
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             use_cache: bool = False,
             output_attentions: bool = False,
-            output_router_logits: Optional[bool] = False,
     ):
         layernorm_output = self.input_layernorm(hidden_states)
         if self.apply_residual_connection_post_layernorm:
@@ -729,32 +618,18 @@ class TelechatBlock(nn.Module):
             residual = layernorm_output
         else:
             residual = attention_output
-        print("in Telechat Block, layernorm_output.shape", layernorm_output.shape, residual.shape)
         output = self.mlp(layernorm_output, residual)
 
-
-        if isinstance(output, tuple):
-            output, router_logits = output
-            # print(type(output), type(router_logits))  # <class 'torch.Tensor'> <class 'torch.Tensor'>
-        else:
-            router_logits = None
-
         if use_cache:
-            # print(type(output), type(outputs), len(outputs))  # <class 'torch.Tensor'> <class 'tuple'> 1
             outputs = (output,) + outputs
-            # print(type(output), type(outputs), len(outputs))  # <class 'torch.Tensor'> <class 'tuple'> 2
         else:
             outputs = (output,) + outputs[1:]
-            assert 1==0
-
-        if output_router_logits:
-            outputs += (router_logits,)
 
         return outputs
 
 
 class TelechatPreTrainedModel(PreTrainedModel):
-    config_class = TelechatConfig
+    config_class = Telechat2Config
     base_model_prefix = "transformer"
     supports_gradient_checkpointing = True
     _no_split_modules = ["TelechatBlock"]
@@ -785,7 +660,7 @@ class TelechatPreTrainedModel(PreTrainedModel):
 
 
 class TelechatModel(TelechatPreTrainedModel):
-    def __init__(self, config: TelechatConfig):
+    def __init__(self, config: Telechat2Config):
         super().__init__(config)
 
         self.embed_dim = config.hidden_size
@@ -795,11 +670,10 @@ class TelechatModel(TelechatPreTrainedModel):
         if self.config.embed_layernorm:
             self.word_embeddings_layernorm = MixedFusedRMSNorm(self.embed_dim, eps=config.layer_norm_epsilon)
 
-        self.h = nn.ModuleList([TelechatBlock(config ,_) for _ in range(config.num_hidden_layers)])
+        self.h = nn.ModuleList([TelechatBlock(config, _) for _ in range(config.num_hidden_layers)])
         self.ln_f = MixedFusedRMSNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         self.gradient_checkpointing = False
         self.post_init()
-
 
     def get_input_embeddings(self):
         return self.word_embeddings
@@ -833,11 +707,10 @@ class TelechatModel(TelechatPreTrainedModel):
             inputs_embeds: Optional[torch.LongTensor] = None,
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
-            output_router_logits: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             **deprecated_arguments,
-    ) -> Union[Tuple[torch.Tensor, ...], MoeModelOutputWithPast]:
+    ) -> Union[Tuple[torch.Tensor, ...], BaseModelOutputWithPastAndCrossAttentions]:
 
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -845,9 +718,6 @@ class TelechatModel(TelechatPreTrainedModel):
         )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-        output_router_logits = (
-            output_router_logits if output_router_logits is not None else self.config.output_router_logits
-        )
 
         if input_ids is not None:
             batch_size, seq_length = input_ids.shape
@@ -856,12 +726,11 @@ class TelechatModel(TelechatPreTrainedModel):
 
         if past_key_values is None:
             past_key_values = tuple([None] * len(self.h))
-
-
+        # input_ids = torch.load("Megatron-LM-0624-3B/tensors/input_ids.pt").to(input_ids.device)
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
         hidden_states = inputs_embeds
-
+        # print(f"[INFO_Telechat]: inputs_embeds={inputs_embeds}")
         if self.config.embed_layernorm:
             hidden_states = self.word_embeddings_layernorm(inputs_embeds)
 
@@ -887,11 +756,9 @@ class TelechatModel(TelechatPreTrainedModel):
             input_shape=(batch_size, seq_length),
             past_key_values_length=past_key_values_length,
         )
-        all_router_logits = () if output_router_logits else None
 
-
+        # print(f"[INFO_Telechat]: word_embeddings_layernorm={hidden_states}")
         for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
-            print("in TelechatModel forward i", i, "hidden_states.shape", hidden_states.shape)
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
@@ -900,8 +767,7 @@ class TelechatModel(TelechatPreTrainedModel):
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         # None for past_key_value
-                        return module(*inputs, use_cache=use_cache, output_attentions=output_attentions,
-                                      output_router_logits=output_router_logits)
+                        return module(*inputs, use_cache=use_cache, output_attentions=output_attentions)
 
                     return custom_forward
 
@@ -918,56 +784,45 @@ class TelechatModel(TelechatPreTrainedModel):
                     attention_mask=causal_mask,
                     use_cache=use_cache,
                     output_attentions=output_attentions,
-                    output_router_logits=output_router_logits,
                 )
 
+            # print(f"[INFO_Telechat]: outputs{i}={outputs}")
             hidden_states = outputs[0]
-            print("in TelechatModel after block forward, hidden_states.shape", hidden_states.shape)
             if use_cache is True:
                 presents = presents + (outputs[1],)
 
             if output_attentions:
                 all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
-
-            if output_router_logits and outputs[-1] is not None:
-                all_router_logits += (outputs[-1],)
-
-
         hidden_states = self.ln_f(hidden_states)
+        # print(f"[INFO_Telechat]: hidden_states={hidden_states}")
+        # ref = torch.load("Megatron-LM-0624-3B/tensors/final_layernorm.pt")
+        # print(hidden_states.squeeze()[2048:])
+        # print(ref.squeeze())
+        # print(torch.max(hidden_states.squeeze()[2048:] - ref.squeeze().to(hidden_states.device)))
+        # exit()
+        # print(ref.shape,hidden_states.shape)
+        # print(hidden_states)
+        # exit()
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
         if not return_dict:
-            assert 1==0
-            return tuple(v for v in [hidden_states, presents, all_hidden_states, all_self_attentions, all_router_logits] if v is not None)
-        # return BaseModelOutputWithPastAndCrossAttentions(
-        #     last_hidden_state=hidden_states,
-        #     past_key_values=presents,
-        #     hidden_states=all_hidden_states,
-        #     attentions=all_self_attentions,
-        # )
-
-        # print(type(all_router_logits), type(all_router_logits[0]), type(all_router_logits[-1])) # <class 'tuple'> <class 'torch.Tensor'> <class 'torch.Tensor'>
-
-        return MoeModelOutputWithPast(
+            return tuple(v for v in [hidden_states, presents, all_hidden_states, all_self_attentions] if v is not None)
+        return BaseModelOutputWithPastAndCrossAttentions(
             last_hidden_state=hidden_states,
             past_key_values=presents,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
-            router_logits=all_router_logits,
         )
 
 
-class TelechatForCausalLM(TelechatPreTrainedModel):
+class Telechat2ForCausalLM(TelechatPreTrainedModel):
     # _tied_weights_keys = ["lm_head.weight"]
-    _keys_to_ignore_on_load_missing = [ r"lm_head.weight"]
-    def __init__(self, config: TelechatConfig):
+    _keys_to_ignore_on_load_missing = [r"lm_head.weight"]
+
+    def __init__(self, config: Telechat2Config):
         super().__init__(config)
         self.transformer = TelechatModel(config)
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-        self.router_aux_loss_coef = config.router_aux_loss_coef
-        self.num_experts = config.num_experts
-        self.num_experts_per_tok = config.num_experts_per_tok
         self.post_init()
 
     def get_output_embeddings(self):
@@ -1010,14 +865,10 @@ class TelechatForCausalLM(TelechatPreTrainedModel):
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
-            output_router_logits: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             **deprecated_arguments,
-    ) -> Union[Tuple[torch.Tensor], CausalLMOutputWithPast]:
+    ) -> Union[Tuple[torch.Tensor], CausalLMOutputWithCrossAttentions]:
 
-        output_router_logits = (
-            output_router_logits if output_router_logits is not None else self.config.output_router_logits
-        )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         transformer_outputs = self.transformer(
@@ -1028,11 +879,9 @@ class TelechatForCausalLM(TelechatPreTrainedModel):
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
-            output_router_logits=output_router_logits,
             return_dict=return_dict,
         )
         hidden_states = transformer_outputs[0]
-        print(type(transformer_outputs), type(hidden_states))
         lm_logits = self.lm_head(hidden_states)
 
         loss = None
@@ -1046,22 +895,11 @@ class TelechatForCausalLM(TelechatPreTrainedModel):
                 shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
             )
 
-        aux_loss = None
-        if output_router_logits:
-            aux_loss = load_balancing_loss_func(
-                transformer_outputs.router_logits if return_dict else transformer_outputs[-1],
-                self.num_experts,
-                self.num_experts_per_tok,
-                attention_mask,
-            )
-            if labels is not None:
-                loss += self.router_aux_loss_coef * aux_loss.to(loss.device)  # make sure to reside in the same device
-
         if not return_dict:
             output = (lm_logits,) + transformer_outputs[1:]
             return ((loss,) + output) if loss is not None else output
 
-        return CausalLMOutputWithPast(
+        return CausalLMOutputWithCrossAttentions(
             loss=loss,
             logits=lm_logits,
             past_key_values=transformer_outputs.past_key_values,
