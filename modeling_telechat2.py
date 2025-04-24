@@ -1200,7 +1200,7 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
                 shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
             )
             print(f"loss is {loss}")
-        lm_loss = loss.detach()
+        lm_loss = loss.clone().detach()
 
         aux_loss = None
         if output_router_logits:
