@@ -68,6 +68,10 @@ class Telechat2Config(PretrainedConfig):
         training_seqlen = 8192,
         logn = True,
         embed_layernorm = False,
+            moe_input_jitter_eps = 0,
+            output_router_logits = True,
+            num_moe_experts = 0,
+            moe_aux_loss_coeff = 0,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -88,6 +92,10 @@ class Telechat2Config(PretrainedConfig):
         self.training_seqlen = training_seqlen
         self.embed_layernorm = embed_layernorm
         self.num_key_value_heads= kwargs.pop("num_key_value_heads", None)
+        self.moe_input_jitter_eps = moe_input_jitter_eps
+        self.output_router_logits = output_router_logits
+        self.num_moe_experts = num_moe_experts
+        self.moe_aux_loss_coeff = moe_aux_loss_coeff
 
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)
