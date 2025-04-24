@@ -232,13 +232,22 @@ class CustomTrainer(Trainer):
 
             # all_gather + mean() to get average loss over all processes
             tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
+            accumulated_loss_scalar_dict = {}
+            for key in self.accumulated_loss_dict:
+                accumulated_loss_scalar_dict[key] = self._nested_gather(self.accumulated_loss_dict[key]).mean().item()
             print(f"tr_loss {tr_loss}")
             print(f"tr_loss_scalar {tr_loss_scalar}")
 
             # reset tr_loss to zero
             tr_loss -= tr_loss
 
+            # reset
+            for key in self.accumulated_loss_dict:
+                self.accumulated_loss_dict[key] = torch.tensor(0.0).to(tr_loss.device)
+
             logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
+            for key in accumulated_loss_scalar_dict:
+                logs[key] = round(accumulated_loss_scalar_dict[key] / (self.state.global_step - self._globalstep_last_logged), 4)
             if grad_norm is not None:
                 logs["grad_norm"] = grad_norm.detach().item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             logs["learning_rate"] = self._get_learning_rate()
@@ -555,13 +564,19 @@ class CustomTrainer(Trainer):
                         else contextlib.nullcontext
                     )
                     with context():
-                        tr_loss_step = self.training_step(model, inputs, num_items_in_batch)
+                        tr_loss_step, detailed_detached_loss_dict = self.training_step(model, inputs, num_items_in_batch)
+
+                    # create an additional loss logger to record detailed losses
+                    if not hasattr(self, 'accumulated_loss_dict'):
+                        self.accumulated_loss_dict = {key: torch.tensor(0.0).to(tr_loss.device)
+                                                      for key in detailed_detached_loss_dict.keys()}
 
                     if (
                         args.logging_nan_inf_filter
                         and not is_torch_xla_available()
                         and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
                     ):
+                        assert 1==0
                         # if loss is nan or inf simply add the average of previous logged losses
                         tr_loss = tr_loss + tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
                     else:
@@ -570,6 +585,15 @@ class CustomTrainer(Trainer):
                                 f"Calculated loss must be on the original device: {tr_loss.device} but device in use is {tr_loss_step.device}"
                             )
                         tr_loss = tr_loss + tr_loss_step
+
+                        # Accumulate the detailed losses
+                        for key in detailed_detached_loss_dict:
+                            print(key)
+                            if detailed_detached_loss_dict[key].device != self.accumulated_loss_dict[key].device:
+                                raise ValueError(
+                                    f"Calculated loss must be on the original device: {detailed_detached_loss_dict[key].device} but device in use is {self.accumulated_loss_dict[key].device}"
+                                )
+                            self.accumulated_loss_dict[key] += detailed_detached_loss_dict[key]
 
                     self.current_flos += float(self.floating_point_ops(inputs))
 
@@ -755,6 +779,7 @@ class CustomTrainer(Trainer):
         with self.compute_loss_context_manager():
             _return_dict = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch, return_dict=True)
             loss = _return_dict["loss"]
+            additional_detailed_loss = _return_dict["additional_detailed_loss"]
         del inputs
         if (
             self.args.torch_empty_cache_steps is not None
@@ -792,7 +817,10 @@ class CustomTrainer(Trainer):
         else:
             # Finally we need to normalize the loss for reporting
             if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
+                assert 1==0
                 loss = loss / self.args.gradient_accumulation_steps
+
+            loss = loss / self.args.gradient_accumulation_steps  # bug fix. when using gradient accumulation, the loss scales for telechat model
 
             # Turning off loss scaling w.r.t. gradient accumulation when DeepSpeed is enabled
             # https://github.com/huggingface/transformers/pull/35808
@@ -801,7 +829,7 @@ class CustomTrainer(Trainer):
 
             self.accelerator.backward(loss, **kwargs)
 
-            return loss.detach()
+            return loss.detach(), {k: v.detach() for k, v in additional_detailed_loss.items()}
 
 
     @override
@@ -868,7 +896,11 @@ class CustomTrainer(Trainer):
                 )
             # We don't use .loss here since the model may return tuples instead of ModelOutput.
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-            aux_loss = outputs["aux_loss"]
+            print(outputs)
+            assert 1==0
+            keys_to_remove = {'loss', 'logits', 'past_key_values', 'hidden_states', 'attentions'}
+            outputs = {k: v for k, v in outputs.items() if k not in keys_to_remove}
+            additional_detailed_loss = outputs
         if (
             self.args.average_tokens_across_devices
             and (self.model_accepts_loss_kwargs or self.compute_loss_func)
@@ -881,8 +913,9 @@ class CustomTrainer(Trainer):
         if return_dict:
             return {
                 "loss": loss,
-                "aux_loss": aux_loss
+                "additional_detailed_loss": additional_detailed_loss
             }
         else:
+            assert 1==0
             return (loss, outputs) if return_outputs else loss
 

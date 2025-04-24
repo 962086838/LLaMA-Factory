@@ -21,8 +21,8 @@ preprocessing_num_workers: 16
 tokenized_path: /gemini/space/thu/receieve_wangzihan/Megatron-LM-core_r0.6.0_dropout_HWMoE/converted_dataset
 
 ### train
-per_device_train_batch_size: 4
-gradient_accumulation_steps: 2
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
 learning_rate: 3.0e-4
 num_train_epochs: 1
 lr_scheduler_type: cosine

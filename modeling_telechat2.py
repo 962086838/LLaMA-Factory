@@ -121,6 +121,7 @@ class MoECausalLMOutputWithCrossAttentions(ModelOutput):
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    lm_loss: Optional[torch.FloatTensor] = None
     aux_loss: Optional[torch.FloatTensor] = None
 
 
@@ -1199,6 +1200,7 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
                 shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
             )
             print(f"loss is {loss}")
+        lm_loss = loss.detach()
 
         aux_loss = None
         if output_router_logits:
@@ -1224,7 +1226,8 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
 
         # assert 1==0
 
-        print(f"forward return loss {loss}")
+        # print(f"forward return loss {loss}")
+
 
         return MoECausalLMOutputWithCrossAttentions(
             loss=loss,
@@ -1232,5 +1235,6 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
+            lm_loss=lm_loss,
             aux_loss=aux_loss,
         )
