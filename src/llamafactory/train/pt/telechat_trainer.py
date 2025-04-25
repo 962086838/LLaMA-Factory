@@ -206,6 +206,7 @@ class CustomTrainer(Trainer):
             kwargs["processing_class"] = kwargs.pop("tokenizer")
 
         super().__init__(**kwargs)
+        # print(self.callback_handler.callbacks)
         if processor is not None:
             # avoid wrong loss under gradient accumulation
             # https://github.com/huggingface/transformers/pull/36044#issuecomment-2746657112
@@ -235,8 +236,8 @@ class CustomTrainer(Trainer):
             accumulated_loss_scalar_dict = {}
             for key in self.accumulated_loss_dict:
                 accumulated_loss_scalar_dict[key] = self._nested_gather(self.accumulated_loss_dict[key]).mean().item()
-            print(f"tr_loss {tr_loss}")
-            print(f"tr_loss_scalar {tr_loss_scalar}")
+            # print(f"tr_loss {tr_loss}")
+            # print(f"tr_loss_scalar {tr_loss_scalar}")
 
             # reset tr_loss to zero
             tr_loss -= tr_loss
@@ -245,6 +246,8 @@ class CustomTrainer(Trainer):
             for key in self.accumulated_loss_dict:
                 self.accumulated_loss_dict[key] = torch.tensor(0.0).to(tr_loss.device)
 
+            logs["time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            logs["step"] = self.state.global_step
             logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
             for key in accumulated_loss_scalar_dict:
                 logs[key] = round(accumulated_loss_scalar_dict[key] / (self.state.global_step - self._globalstep_last_logged), 4)
@@ -257,7 +260,6 @@ class CustomTrainer(Trainer):
             self.store_flos()
 
             self.log(logs, start_time)
-            assert 1 == 0
 
     @override
     def _inner_training_loop(
@@ -588,7 +590,7 @@ class CustomTrainer(Trainer):
 
                         # Accumulate the detailed losses
                         for key in detailed_detached_loss_dict:
-                            print(key)
+                            # print(key)
                             if detailed_detached_loss_dict[key].device != self.accumulated_loss_dict[key].device:
                                 raise ValueError(
                                     f"Calculated loss must be on the original device: {detailed_detached_loss_dict[key].device} but device in use is {self.accumulated_loss_dict[key].device}"
@@ -829,7 +831,7 @@ class CustomTrainer(Trainer):
 
             self.accelerator.backward(loss, **kwargs)
 
-            return loss.detach(), {k: v.detach() for k, v in additional_detailed_loss.items()}
+            return loss.detach(), {k: v.detach() / self.args.gradient_accumulation_steps for k, v in additional_detailed_loss.items()}
 
 
     @override
@@ -896,8 +898,8 @@ class CustomTrainer(Trainer):
                 )
             # We don't use .loss here since the model may return tuples instead of ModelOutput.
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
-            print(outputs)
-            assert 1==0
+            # print(outputs)
+            # assert 1==0
             keys_to_remove = {'loss', 'logits', 'past_key_values', 'hidden_states', 'attentions'}
             outputs = {k: v for k, v in outputs.items() if k not in keys_to_remove}
             additional_detailed_loss = outputs

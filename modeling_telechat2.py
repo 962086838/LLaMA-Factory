@@ -1199,7 +1199,7 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
             loss = loss_fct(
                 shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
             )
-            print(f"loss is {loss}")
+            # print(f"loss is {loss}")
         lm_loss = loss.clone().detach()
 
         aux_loss = None
@@ -1210,11 +1210,11 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
                 self.config.expert_chosen,
                 attention_mask,
             )
-            print(f"aux loss is {aux_loss}")
+            # print(f"aux loss is {aux_loss}")
 
             if labels is not None:
                 loss += self.moe_aux_loss_coeff * aux_loss.to(loss.device)  # make sure to reside in the same device
-                print(f"After add, loss is {loss}")
+                # print(f"After add, loss is {loss}")
 
 
         if not return_dict:
