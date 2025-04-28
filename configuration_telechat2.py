@@ -72,6 +72,12 @@ class Telechat2Config(PretrainedConfig):
             output_router_logits = True,
             num_moe_experts = 0,
             moe_aux_loss_coeff = 0,
+            multi_forward_expert_list = [],
+            distill_all_hidden_states = True,
+            hidden_loss_weight = 0.01,
+            kl_loss_weight = 0.01,
+            temperature = 3,
+            output_hidden_states_layer = [],
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -96,6 +102,12 @@ class Telechat2Config(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.num_moe_experts = num_moe_experts
         self.moe_aux_loss_coeff = moe_aux_loss_coeff
+        self.multi_forward_expert_list = multi_forward_expert_list
+        self.distill_all_hidden_states = distill_all_hidden_states
+        self.hidden_loss_weight = hidden_loss_weight
+        self.kl_loss_weight = kl_loss_weight
+        self.temperature = temperature
+        self.output_hidden_states_layer = output_hidden_states_layer
 
 
         super().__init__(bos_token_id=bos_token_id, eos_token_id=eos_token_id, **kwargs)

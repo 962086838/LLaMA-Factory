@@ -55,6 +55,7 @@ def run_pt(
         finetuning_args=finetuning_args,
         data_collator=data_collator,
         callbacks=callbacks,
+        multi_forward_expert_list=model.multi_forward_expert_list,
         **dataset_module,
         **tokenizer_module,
     )

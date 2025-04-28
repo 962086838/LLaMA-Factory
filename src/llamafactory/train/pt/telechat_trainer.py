@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from types import MethodType
-from typing import TYPE_CHECKING, Optional, Union, Any
+from typing import TYPE_CHECKING, Optional, Union, Any, List
 from torch import nn
 
 import importlib
@@ -200,7 +200,7 @@ class CustomTrainer(Trainer):
     r"""Inherit Trainer for custom optimizer."""
 
     def __init__(
-        self, finetuning_args: "FinetuningArguments", processor: Optional["ProcessorMixin"], **kwargs
+        self, finetuning_args: "FinetuningArguments", processor: Optional["ProcessorMixin"], multi_forward_expert_list: List, **kwargs
     ) -> None:
         if is_transformers_version_greater_than("4.46"):
             kwargs["processing_class"] = kwargs.pop("tokenizer")
@@ -222,6 +222,7 @@ class CustomTrainer(Trainer):
 
             self.accelerator.clip_grad_norm_ = MethodType(clip_grad_norm_old_version, self.accelerator)
             self.add_callback(BAdamCallback)
+        self.multi_forward_expert_list = multi_forward_expert_list
 
     @override
     def _maybe_log_save_evaluate(self, tr_loss, grad_norm, model, trial, epoch, ignore_keys_for_eval, start_time):
@@ -235,22 +236,43 @@ class CustomTrainer(Trainer):
             tr_loss_scalar = self._nested_gather(tr_loss).mean().item()
             accumulated_loss_scalar_dict = {}
             for key in self.accumulated_loss_dict:
-                accumulated_loss_scalar_dict[key] = self._nested_gather(self.accumulated_loss_dict[key]).mean().item()
+                if isinstance(self.accumulated_loss_dict[key], torch.Tensor):
+                    accumulated_loss_scalar_dict[key] = self._nested_gather(self.accumulated_loss_dict[key]).mean().item()
+                elif isinstance(self.accumulated_loss_dict[key], dict):
+                    accumulated_loss_scalar_dict[key] = {}
+                    for k in self.accumulated_loss_dict[key]:
+                        accumulated_loss_scalar_dict[key][k] = self._nested_gather(self.accumulated_loss_dict[key][k]).mean().item()
+                        assert isinstance(accumulated_loss_scalar_dict[key][k], float), f"accumulated_loss_scalar_dict[key][k] key {key} k {k} type {type(accumulated_loss_scalar_dict[key][k])}"
+                else:
+                    raise TypeError
             # print(f"tr_loss {tr_loss}")
             # print(f"tr_loss_scalar {tr_loss_scalar}")
 
             # reset tr_loss to zero
             tr_loss -= tr_loss
 
-            # reset
+            # reset self.accumulated_loss_dict
             for key in self.accumulated_loss_dict:
-                self.accumulated_loss_dict[key] = torch.tensor(0.0).to(tr_loss.device)
+                if isinstance(self.accumulated_loss_dict[key], torch.Tensor):
+                    self.accumulated_loss_dict[key] = torch.tensor(0.0).to(tr_loss.device)
+                elif isinstance(self.accumulated_loss_dict[key], dict):
+                    for k in self.accumulated_loss_dict[key]:
+                        self.accumulated_loss_dict[key][k] = torch.tensor(0.0).to(tr_loss.device)
+                else:
+                    raise TypeError
 
             logs["time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
             logs["step"] = self.state.global_step
             logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
             for key in accumulated_loss_scalar_dict:
-                logs[key] = round(accumulated_loss_scalar_dict[key] / (self.state.global_step - self._globalstep_last_logged), 4)
+                if isinstance(accumulated_loss_scalar_dict[key], torch.Tensor) or isinstance(accumulated_loss_scalar_dict[key], float):
+                    logs[key] = round(accumulated_loss_scalar_dict[key] / (self.state.global_step - self._globalstep_last_logged), 4)
+                elif isinstance(accumulated_loss_scalar_dict[key], dict):
+                    for k in accumulated_loss_scalar_dict[key]:
+                        logs[k] = round(accumulated_loss_scalar_dict[key][k] / (self.state.global_step - self._globalstep_last_logged), 4)
+                else:
+                    print(type(accumulated_loss_scalar_dict[key]))
+                    raise TypeError
             if grad_norm is not None:
                 logs["grad_norm"] = grad_norm.detach().item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             logs["learning_rate"] = self._get_learning_rate()
@@ -260,6 +282,18 @@ class CustomTrainer(Trainer):
             self.store_flos()
 
             self.log(logs, start_time)
+
+        metrics = None
+        if self.control.should_evaluate:
+            metrics = self._evaluate(trial, ignore_keys_for_eval)
+            is_new_best_metric = self._determine_best_metric(metrics=metrics, trial=trial)
+
+            if self.args.save_strategy == SaveStrategy.BEST:
+                self.control.should_save = is_new_best_metric
+
+        if self.control.should_save:
+            self._save_checkpoint(model, trial)
+            self.control = self.callback_handler.on_save(self.args, self.state, self.control)
 
     @override
     def _inner_training_loop(
@@ -350,6 +384,7 @@ class CustomTrainer(Trainer):
 
         # Activate gradient checkpointing if needed
         if args.gradient_checkpointing:
+            assert 1==0
             self.model.gradient_checkpointing_enable(gradient_checkpointing_kwargs=args.gradient_checkpointing_kwargs)
 
         model = self._wrap_model(self.model_wrapped)
@@ -570,8 +605,17 @@ class CustomTrainer(Trainer):
 
                     # create an additional loss logger to record detailed losses
                     if not hasattr(self, 'accumulated_loss_dict'):
-                        self.accumulated_loss_dict = {key: torch.tensor(0.0).to(tr_loss.device)
-                                                      for key in detailed_detached_loss_dict.keys()}
+                        self.accumulated_loss_dict = {}
+                        for key, value in detailed_detached_loss_dict.items():
+                            if isinstance(value, torch.Tensor):
+                                self.accumulated_loss_dict[key] = torch.tensor(0.0).to(tr_loss.device)
+                            elif isinstance(value, dict):
+                                self.accumulated_loss_dict[key] = {}
+                                for k, v in detailed_detached_loss_dict[key].items():
+                                    self.accumulated_loss_dict[key][k] = torch.tensor(0.0).to(tr_loss.device)
+                            else:
+                                raise TypeError
+
 
                     if (
                         args.logging_nan_inf_filter
@@ -591,11 +635,21 @@ class CustomTrainer(Trainer):
                         # Accumulate the detailed losses
                         for key in detailed_detached_loss_dict:
                             # print(key)
-                            if detailed_detached_loss_dict[key].device != self.accumulated_loss_dict[key].device:
-                                raise ValueError(
-                                    f"Calculated loss must be on the original device: {detailed_detached_loss_dict[key].device} but device in use is {self.accumulated_loss_dict[key].device}"
-                                )
-                            self.accumulated_loss_dict[key] += detailed_detached_loss_dict[key]
+                            if isinstance(detailed_detached_loss_dict[key], torch.Tensor):
+                                if detailed_detached_loss_dict[key].device != self.accumulated_loss_dict[key].device:
+                                    raise ValueError(
+                                        f"Calculated loss must be on the original device: {detailed_detached_loss_dict[key].device} but device in use is {self.accumulated_loss_dict[key].device}"
+                                    )
+                                self.accumulated_loss_dict[key] += detailed_detached_loss_dict[key]
+                            elif isinstance(detailed_detached_loss_dict[key], dict):
+                                assert isinstance(self.accumulated_loss_dict[key], dict), f"key {key}, detailed_detached_loss_dict[key] type {type(detailed_detached_loss_dict[key])}, self.accumulated_loss_dict type {type(self.accumulated_loss_dict[key])}"
+                                for k,v in detailed_detached_loss_dict[key].items():
+                                    if detailed_detached_loss_dict[key][k].device != self.accumulated_loss_dict[key][k].device:
+                                        # raise ValueError(
+                                        #     f"Calculated loss must be on the original device: {detailed_detached_loss_dict[key][k].device} but device in use is {self.accumulated_loss_dict[key][k].device}"
+                                        # )
+                                        self.accumulated_loss_dict[key][k].to(detailed_detached_loss_dict[key][k].device)
+                                    self.accumulated_loss_dict[key][k] += detailed_detached_loss_dict[key][k]
 
                     self.current_flos += float(self.floating_point_ops(inputs))
 
@@ -633,6 +687,8 @@ class CustomTrainer(Trainer):
                         self.control = self.callback_handler.on_pre_optimizer_step(args, self.state, self.control)
 
                         self.optimizer.step()
+
+                        # torch.cuda.empty_cache()
 
                         self.control = self.callback_handler.on_optimizer_step(args, self.state, self.control)
 
@@ -831,7 +887,19 @@ class CustomTrainer(Trainer):
 
             self.accelerator.backward(loss, **kwargs)
 
-            return loss.detach(), {k: v.detach() / self.args.gradient_accumulation_steps for k, v in additional_detailed_loss.items()}
+            additional_detailed_loss_detached = {}
+            for k, v in additional_detailed_loss.items():
+                if isinstance(v, torch.Tensor):
+                    additional_detailed_loss_detached[k] = v.detach() / self.args.gradient_accumulation_steps
+                elif isinstance(v, dict):
+                    _tmp_dict = {}
+                    for _k, _v in v.items():
+                        _tmp_dict[_k] = _v.detach() / self.args.gradient_accumulation_steps
+                    additional_detailed_loss_detached[k] = _tmp_dict
+                else:
+                    raise ValueError()
+
+            return loss.detach(), additional_detailed_loss_detached
 
 
     @override
@@ -870,7 +938,11 @@ class CustomTrainer(Trainer):
             if num_items_in_batch is not None:
                 loss_kwargs["num_items_in_batch"] = num_items_in_batch
             inputs = {**inputs, **loss_kwargs}
-        outputs = model(**inputs)
+        # print(inputs)
+        if isinstance(self.model.multi_forward_expert_list, list) and len(self.model.multi_forward_expert_list) > 1:
+            outputs = model.multi_forward_with_expert_list(**inputs)
+        else:
+            outputs = model(**inputs)
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
         if self.args.past_index >= 0:
@@ -903,6 +975,7 @@ class CustomTrainer(Trainer):
             keys_to_remove = {'loss', 'logits', 'past_key_values', 'hidden_states', 'attentions'}
             outputs = {k: v for k, v in outputs.items() if k not in keys_to_remove}
             additional_detailed_loss = outputs
+            # print(additional_detailed_loss.keys())  # dict_keys(['lm_loss', 'aux_loss', 'hidden_state_loss', 'kl_loss'])
         if (
             self.args.average_tokens_across_devices
             and (self.model_accepts_loss_kwargs or self.compute_loss_func)
