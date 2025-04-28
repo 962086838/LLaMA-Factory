@@ -37,6 +37,12 @@
   "base_seqlen":8192,
   "num_moe_experts": 16,
   "expert_chosen": 2,
-  "moe_aux_loss_coeff": 1e-2
+  "moe_aux_loss_coeff": 1e-2,
+  "multi_forward_expert_list": [4,8,16],
+  "distill_all_hidden_states": false,
+  "hidden_loss_weight": 1e-5,
+  "kl_loss_weight": 1e-2,
+  "temperature": 3,
+  "output_hidden_states_layer": [23]
 }
 
