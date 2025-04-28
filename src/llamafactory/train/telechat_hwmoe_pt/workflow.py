@@ -24,7 +24,8 @@ from ...data import get_dataset, get_template_and_fix_tokenizer
 from ...extras.ploting import plot_loss
 from ...model import load_model, load_tokenizer
 from ..trainer_utils import create_modelcard_and_push
-from .trainer import CustomTrainer
+# from .trainer import CustomTrainer
+from .telechat_hwmoe_trainer import CustomTrainer
 
 
 if TYPE_CHECKING:
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from ...hparams import DataArguments, FinetuningArguments, ModelArguments
 
 
-def run_telechat_moe_pt(
+def run_pt(
     model_args: "ModelArguments",
     data_args: "DataArguments",
     training_args: "Seq2SeqTrainingArguments",
@@ -54,6 +55,7 @@ def run_telechat_moe_pt(
         finetuning_args=finetuning_args,
         data_collator=data_collator,
         callbacks=callbacks,
+        multi_forward_expert_list=model.multi_forward_expert_list,
         **dataset_module,
         **tokenizer_module,
     )
