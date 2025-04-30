@@ -844,6 +844,11 @@ class CustomTrainer(Trainer):
                     # Student backward (立即执行)
                     self.accelerator.backward(student_outputs[expert_limit]['loss'])
 
+        # bug fix. when using gradient accumulation, the loss scales for telechat model
+        for key, value in detailed_losses.items():
+            if "loss" in key:
+                detailed_losses[key] = value / self.args.gradient_accumulation_steps
+
         return total_loss.detach(), detailed_losses
 
     def _teacher_forward_pass(self, model, inputs, num_items_in_batch=None):
