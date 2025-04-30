@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from ...hparams import DataArguments, FinetuningArguments, ModelArguments
 
 
-def run_pt(
+def run_telechat_hwmoe_pt(
     model_args: "ModelArguments",
     data_args: "DataArguments",
     training_args: "Seq2SeqTrainingArguments",

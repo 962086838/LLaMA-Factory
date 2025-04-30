@@ -15,6 +15,7 @@
 from types import MethodType
 from typing import TYPE_CHECKING, Optional, Union, Any, List
 from torch import nn
+from torch.nn import functional as F
 
 import importlib
 import contextlib
@@ -805,102 +806,115 @@ class CustomTrainer(Trainer):
 
     @override
     def training_step(
-        self, model: nn.Module, inputs: dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None
+            self, model: nn.Module, inputs: dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None
     ) -> torch.Tensor:
-        """
-        Perform a training step on a batch of inputs.
-
-        Subclass and override to inject custom behavior.
-
-        Args:
-            model (`nn.Module`):
-                The model to train.
-            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
-                The inputs and targets of the model.
-
-                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
-                argument `labels`. Check your model's documentation for all accepted arguments.
-
-        Return:
-            `torch.Tensor`: The tensor with training loss on this batch.
-        """
         model.train()
         if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
             self.optimizer.train()
 
         inputs = self._prepare_inputs(inputs)
-        if is_sagemaker_mp_enabled():
-            assert 1==0
-            loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
-            return loss_mb.reduce_mean().detach().to(self.args.device)
+
+        total_loss = 0
+        detailed_losses = {}
 
         with self.compute_loss_context_manager():
-            _return_dict = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch, return_dict=True)
-            loss = _return_dict["loss"]
-            additional_detailed_loss = _return_dict["additional_detailed_loss"]
-        del inputs
-        if (
-            self.args.torch_empty_cache_steps is not None
-            and self.state.global_step % self.args.torch_empty_cache_steps == 0
-        ):
-            if is_torch_xpu_available():
-                torch.xpu.empty_cache()
-            elif is_torch_mlu_available():
-                torch.mlu.empty_cache()
-            elif is_torch_musa_available():
-                torch.musa.empty_cache()
-            elif is_torch_npu_available():
-                torch.npu.empty_cache()
-            elif is_torch_mps_available(min_version="2.0"):
-                torch.mps.empty_cache()
-            elif is_torch_hpu_available():
-                logger.warning(
-                    "`torch_empty_cache_steps` is set but HPU device/backend does not support empty_cache()."
-                )
-            else:
-                torch.cuda.empty_cache()
+            # First run teacher (full expert model) forward pass
+            teacher_outputs = self._teacher_forward_pass(model, inputs)
+            teacher_loss = teacher_outputs.loss
+            detailed_losses["lm_loss"] = teacher_outputs.lm_loss.detach()
+            detailed_losses["aux_loss"] = teacher_outputs.aux_loss.detach()
 
-        kwargs = {}
+            # Teacher backward (立即执行)
+            self.accelerator.backward(teacher_loss)
 
-        # For LOMO optimizers you need to explicitly use the learnign rate
-        if self.args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
-            kwargs["learning_rate"] = self._get_learning_rate()
+            # Run student forward passes and compute distillation losses
+            student_outputs = {}
+            for expert_limit in self.multi_forward_expert_list:
+                if expert_limit != self.model.config.num_moe_experts:  # Skip teacher
+                    student_outputs[expert_limit] = self._student_forward_pass(
+                        model, inputs, expert_limit, teacher_outputs
+                    )
+                    total_loss += student_outputs[expert_limit]['loss']
+                    detailed_losses.update({
+                        f"student_{expert_limit}_loss": student_outputs[expert_limit]['loss'].detach(),
+                        f"student_{expert_limit}_hidden_loss": student_outputs[expert_limit]['hidden_loss'].detach(),
+                        f"student_{expert_limit}_kl_loss": student_outputs[expert_limit]['kl_loss'].detach(),
+                    })
 
-        if self.args.n_gpu > 1:
-            loss = loss.mean()  # mean() to average on multi-gpu parallel training
+                    # Student backward (立即执行)
+                    self.accelerator.backward(student_outputs[expert_limit]['loss'])
 
-        if self.use_apex:
-            with amp.scale_loss(loss, self.optimizer) as scaled_loss:
-                scaled_loss.backward()
+        return total_loss.detach(), detailed_losses
+
+    def _teacher_forward_pass(self, model, inputs, num_items_in_batch=None):
+        """Run forward pass for teacher model (full experts)"""
+        if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
+            labels = inputs.pop("labels")
         else:
-            # Finally we need to normalize the loss for reporting
-            if not self.model_accepts_loss_kwargs and self.compute_loss_func is None:
-                assert 1==0
-                loss = loss / self.args.gradient_accumulation_steps
+            labels = None
+        if self.model_accepts_loss_kwargs:
+            loss_kwargs = {}
+            if num_items_in_batch is not None:
+                loss_kwargs["num_items_in_batch"] = num_items_in_batch
+            inputs = {**inputs, **loss_kwargs}
 
-            loss = loss / self.args.gradient_accumulation_steps  # bug fix. when using gradient accumulation, the loss scales for telechat model
+        with torch.set_grad_enabled(True):
+            return model(
+                **inputs,
+                # expert_limit=self.config.num_moe_experts,
+                output_hidden_states=True,  # Need hidden states for distillation
+                return_dict=True
+            )
 
-            # Turning off loss scaling w.r.t. gradient accumulation when DeepSpeed is enabled
-            # https://github.com/huggingface/transformers/pull/35808
-            if self.accelerator.distributed_type == DistributedType.DEEPSPEED:
-                kwargs["scale_wrt_gas"] = False
+    def _student_forward_pass(self, model, inputs, expert_limit, teacher_outputs):
+        """Run forward pass for student model and compute distillation losses"""
+        with torch.set_grad_enabled(True):
+            # Student forward pass
+            student_outputs = model.single_forward_with_expert_limit(
+                **inputs,
+                expert_limit=expert_limit,
+                output_hidden_states=True,
+                return_dict=True,
+                output_router_logits=False
+            )
 
-            self.accelerator.backward(loss, **kwargs)
+            # Compute losses
+            loss = 0
+            detailed_losses = {}
 
-            additional_detailed_loss_detached = {}
-            for k, v in additional_detailed_loss.items():
-                if isinstance(v, torch.Tensor):
-                    additional_detailed_loss_detached[k] = v.detach() / self.args.gradient_accumulation_steps
-                elif isinstance(v, dict):
-                    _tmp_dict = {}
-                    for _k, _v in v.items():
-                        _tmp_dict[_k] = _v.detach() / self.args.gradient_accumulation_steps
-                    additional_detailed_loss_detached[k] = _tmp_dict
-                else:
-                    raise ValueError()
+            # 1. Original LM loss
+            lm_loss = student_outputs.loss
+            loss += lm_loss
+            detailed_losses['lm_loss'] = lm_loss.detach()
 
-            return loss.detach(), additional_detailed_loss_detached
+            # 2. Hidden state distillation loss
+            hidden_loss = F.mse_loss(
+                student_outputs.last_hidden_states,
+                teacher_outputs.last_hidden_states.detach()
+            )
+            loss += self.model.config.hidden_loss_weight * hidden_loss
+            detailed_losses['hidden_loss'] = hidden_loss.detach()
 
+            # 3. KL divergence loss
+            teacher_logits = teacher_outputs.logits[..., :-1, :].contiguous()
+            student_logits = student_outputs.logits[..., :-1, :].contiguous()
+
+            teacher_probs = F.softmax(teacher_logits.detach() / self.model.config.temperature, dim=-1)
+            kl_loss = self.model.kd_loss_function(
+                student_logits,
+                teacher_probs,
+                temperature=self.model.config.temperature
+            ) * (self.model.config.temperature ** 2)
+
+            loss += self.model.config.kl_loss_weight * kl_loss
+            detailed_losses['kl_loss'] = kl_loss.detach()
+
+            return {
+                'loss': loss,
+                'hidden_loss': hidden_loss,
+                'kl_loss': kl_loss,
+                'detailed_losses': detailed_losses
+            }
 
     @override
     def create_optimizer(self) -> "torch.optim.Optimizer":

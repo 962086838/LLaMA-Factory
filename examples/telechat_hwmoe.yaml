@@ -1,0 +1,37 @@
+### model
+model_name_or_path: /gemini/space/thu/TeleChat-1B-exp
+trust_remote_code: true
+train_from_scratch: true
+
+### method
+stage: telechat_hwmoe_pt
+do_train: true
+finetuning_type: full
+deepspeed: examples/deepspeed/ds_z3_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
+
+
+### dataset
+dataset: default
+template: default
+cutoff_len: 8192
+max_samples: 1000
+overwrite_cache: true
+preprocessing_num_workers: 16
+#tokenized_path: /gemini/space/thu/receieve_wangzihan/Megatron-LM-core_r0.6.0_dropout_HWMoE/converted_hf_dataset
+tokenized_path: /gemini/space/thu/receieve_wangzihan/Megatron-LM-core_r0.6.0_dropout_HWMoE/converted_dataset
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+learning_rate: 3.0e-4
+num_train_epochs: 1
+lr_scheduler_type: cosine
+warmup_ratio: 0.0
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+logging_steps: 1
+
+### output
+output_dir: saves/TeleChat-1B-exp/lora/sft
+overwrite_output_dir: true

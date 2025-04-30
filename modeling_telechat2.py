@@ -99,6 +99,7 @@ class HWMoECausalLMOutputWithCrossAttentions(ModelOutput):
     logits: torch.FloatTensor = None
     past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    last_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
     attentions: Optional[Tuple[torch.FloatTensor]] = None
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
     lm_loss: Optional[torch.FloatTensor] = None
@@ -1211,7 +1212,7 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
             output_router_logits: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             **deprecated_arguments,
-    ) -> Union[Tuple[torch.Tensor], MoECausalLMOutputWithCrossAttentions]:
+    ) -> Union[Tuple[torch.Tensor], HWMoECausalLMOutputWithCrossAttentions]:
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         output_router_logits = (
@@ -1230,7 +1231,7 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
             output_router_logits=output_router_logits,
             return_dict=return_dict,
         )
-        hidden_states = transformer_outputs[0]
+        hidden_states = transformer_outputs.last_hidden_state
         lm_logits = self.lm_head(hidden_states)
 
         loss = None
@@ -1273,11 +1274,100 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
         # print(f"forward return loss {loss}")
 
 
-        return MoECausalLMOutputWithCrossAttentions(
+        return HWMoECausalLMOutputWithCrossAttentions(
             loss=loss,
             logits=lm_logits,
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
+            last_hidden_states = hidden_states,
+            attentions=transformer_outputs.attentions,
+            lm_loss=lm_loss,
+            aux_loss=aux_loss,
+        )
+
+    def single_forward_with_expert_limit(
+            self,
+            input_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[Tuple[Tuple[torch.Tensor, torch.Tensor], ...]] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+            labels: Optional[torch.Tensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            output_router_logits: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+            expert_limit: Optional[int] = None,
+            **deprecated_arguments,
+    ) -> Union[Tuple[torch.Tensor], HWMoECausalLMOutputWithCrossAttentions]:
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_router_logits = (
+            output_router_logits if output_router_logits is not None else self.config.output_router_logits
+        )
+
+
+        transformer_outputs = self.transformer(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            output_router_logits=output_router_logits,
+            return_dict=return_dict,
+            expert_limit=expert_limit,
+        )
+        hidden_states = transformer_outputs.last_hidden_state
+        lm_logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            labels = labels.to(lm_logits.device)
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            batch_size, seq_length, vocab_size = shift_logits.shape
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(
+                shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
+            )
+            # print(f"loss is {loss}")
+        lm_loss = loss.clone().detach()
+
+        aux_loss = None
+        if output_router_logits:
+            aux_loss = load_balancing_loss_func(
+                transformer_outputs.router_logits if return_dict else transformer_outputs[-1],
+                self.config.num_moe_experts,
+                self.config.expert_chosen,
+                attention_mask,
+            )
+            # print(f"aux loss is {aux_loss}")
+
+            if labels is not None:
+                loss += self.moe_aux_loss_coeff * aux_loss.to(loss.device)  # make sure to reside in the same device
+                # print(f"After add, loss is {loss}")
+
+
+        if not return_dict:
+            assert 1==0
+            output = (lm_logits,) + transformer_outputs[1:]
+            if output_router_logits:
+                output = (aux_loss,) + output
+            return ((loss,) + output) if loss is not None else output
+
+        # assert 1==0
+
+        # print(f"forward return loss {loss}")
+
+
+        return HWMoECausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            last_hidden_states=hidden_states,
             attentions=transformer_outputs.attentions,
             lm_loss=lm_loss,
             aux_loss=aux_loss,
