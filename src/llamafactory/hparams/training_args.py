@@ -58,7 +58,15 @@ class RayArguments:
 
 
 @dataclass
-class TrainingArguments(RayArguments, Seq2SeqTrainingArguments):
+class HWMoEArguments:
+    force_load_trainer_state: Optional[str] = field(
+        default=None,
+        metadata={"help": "force_load_trainer_state"},
+    )
+
+
+@dataclass
+class TrainingArguments(RayArguments, Seq2SeqTrainingArguments, HWMoEArguments):
     r"""Arguments pertaining to the trainer."""
 
     def __post_init__(self):

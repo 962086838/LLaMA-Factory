@@ -439,9 +439,16 @@ class CustomTrainer(Trainer):
         # ckpt loading
         if resume_from_checkpoint is not None:
             if self.is_deepspeed_enabled:
+                # for name, param in self.model_wrapped.named_parameters():
+                #     if name == "module.transformer.h.21.mlp.local_experts.0.down_proj.bias":
+                #         print(f"before {param}")
                 deepspeed_load_checkpoint(
                     self.model_wrapped, resume_from_checkpoint, load_module_strict=not _is_peft_model(self.model)
                 )
+                # for name, param in self.model_wrapped.named_parameters():
+                #     if name == "module.transformer.h.21.mlp.local_experts.0.down_proj.bias":
+                #         print(f"after {param}")
+                # assert 1==0
             elif is_sagemaker_mp_enabled() or self.is_fsdp_enabled:
                 self._load_from_checkpoint(resume_from_checkpoint, self.model_wrapped)
 
@@ -473,10 +480,11 @@ class CustomTrainer(Trainer):
         steps_trained_progress_bar = None
 
         # Check if continuing training from a checkpoint
-        if resume_from_checkpoint is not None and os.path.isfile(
-            os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME)
-        ):
-            self.state = TrainerState.load_from_json(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME))
+        if (resume_from_checkpoint is not None and os.path.isfile(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME))) or args.force_load_trainer_state:
+            if args.force_load_trainer_state:
+                self.state = TrainerState.load_from_json(args.force_load_trainer_state)
+            else:
+                self.state = TrainerState.load_from_json(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME))
             self.compare_trainer_and_checkpoint_args(self.args, self.state)
             self._load_callback_state()
             epochs_trained = int(self.state.global_step // num_update_steps_per_epoch)
@@ -623,7 +631,6 @@ class CustomTrainer(Trainer):
                         and not is_torch_xla_available()
                         and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
                     ):
-                        assert 1==0
                         # if loss is nan or inf simply add the average of previous logged losses
                         tr_loss = tr_loss + tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
                     else:
@@ -824,6 +831,9 @@ class CustomTrainer(Trainer):
             detailed_losses["lm_loss"] = teacher_outputs.lm_loss.detach()
             detailed_losses["aux_loss"] = teacher_outputs.aux_loss.detach()
 
+            if len(self.multi_forward_expert_list) == 0:
+                total_loss += teacher_loss
+
             # Teacher backward (立即执行)
             self.accelerator.backward(teacher_loss)
 
@@ -868,7 +878,8 @@ class CustomTrainer(Trainer):
                 **inputs,
                 # expert_limit=self.config.num_moe_experts,
                 output_hidden_states=True,  # Need hidden states for distillation
-                return_dict=True
+                return_dict=True,
+                output_router_logits=True
             )
 
     def _student_forward_pass(self, model, inputs, expert_limit, teacher_outputs):
@@ -948,6 +959,7 @@ class CustomTrainer(Trainer):
 
         Subclass and override for custom behavior.
         """
+        assert 1==0
         if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
             labels = inputs.pop("labels")
         else:

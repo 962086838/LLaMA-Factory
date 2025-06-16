@@ -226,7 +226,7 @@ class FlashSelfAttention(torch.nn.Module):
         q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
         cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
                                     device=q.device)
-        self.training = True
+        # self.training = True
         if self.training:
             # during training q,k,v always have same seqlen
             assert seqlen_k == seqlen_q
@@ -1245,10 +1245,11 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
                 shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
             )
             # print(f"loss is {loss}")
-        lm_loss = loss.clone().detach()
+
+        lm_loss = loss.clone().detach() if loss is not None else None
 
         aux_loss = None
-        if output_router_logits:
+        if output_router_logits and self.training:
             aux_loss = load_balancing_loss_func(
                 transformer_outputs.router_logits if return_dict else transformer_outputs[-1],
                 self.config.num_moe_experts,
