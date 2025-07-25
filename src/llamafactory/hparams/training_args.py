@@ -63,6 +63,14 @@ class HWMoEArguments:
         default=None,
         metadata={"help": "force_load_trainer_state"},
     )
+    apply_hwmoe_training_interval: Optional[int] = field(
+        default=1,
+        metadata={"help": "hwmoe_training_interval"},
+    )
+    combine_backward: bool = field(
+        default=False,
+        metadata={"help": "Whether to enable backward combination (combine_backward)"},
+    )
 
 
 @dataclass

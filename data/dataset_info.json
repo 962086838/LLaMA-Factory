@@ -690,6 +690,26 @@
       "prompt": "text"
     }
   },
+  "finewebedu100bt": {
+    "file_name": "/gemini-3/space/thu/hehaowei/modelscope_cache/datasets/fineweb_hhw_transformed/sample/100BT/",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "ultrafineweb_en": {
+    "file_name": "/gemini-3/space/thu/hehaowei/modelscope_cache/datasets/ultrafineweb_hhw_transformed/data/ultrafineweb_en/",
+    "split": "en",
+    "columns": {
+      "prompt": "content"
+    }
+  },
+  "ultrafineweb_zh": {
+    "ms_hub_url": "/gemini-3/space/thu/hehaowei/modelscope_cache/datasets/ultrafineweb_hhw_transformed/data/ultrafineweb_zh",
+    "split": "zh",
+    "columns": {
+      "prompt": "content"
+    }
+  },
   "the_stack": {
     "hf_hub_url": "bigcode/the-stack",
     "ms_hub_url": "AI-ModelScope/the-stack",

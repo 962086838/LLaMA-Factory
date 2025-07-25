@@ -106,6 +106,7 @@ class HWMoECausalLMOutputWithCrossAttentions(ModelOutput):
     aux_loss: Optional[torch.FloatTensor] = None
     hidden_state_loss: Optional[torch.FloatTensor] = None
     kl_loss: Optional[torch.FloatTensor] = None
+    router_bucket_status: Optional[torch.FloatTensor] = None
 
 
 
@@ -136,28 +137,32 @@ class RotaryEmbedding(torch.nn.Module):
         return ntk_alpha
 
     def forward(self, x, seq_dim=0, seq_len=None):
-        if seq_len is None:
-            seq_len = x.shape[seq_dim]
-        seq_len = max(seq_len, self.config.training_seqlen)
-        ntk_alpha = self.get_ntk_alpha(seq_len)
-        self.mscale = float(self.get_mscale(seq_len / self.config.training_seqlen))
-        if True:
-            base = self.base * ntk_alpha ** (self.dim / (self.dim - 2))
-            self.inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2, device=x.device).float() / self.dim))
-            self.max_seq_len_cached = seq_len
-            t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
-            freqs = torch.einsum('i,j->ij', t, self.inv_freq)
-            # Different from paper, but it uses a different permutation in order to obtain the same calculation
-            emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
-            if self.precision == torch.bfloat16:
-                emb = emb.float()
-            # [sx, 1 (b * np), hn]
-            self.cos_cached = self.mscale * emb.cos()[:, None, :].half()
-            self.sin_cached = self.mscale * emb.sin()[:, None, :].half()
-            if self.precision == torch.bfloat16:
-                self.cos_cached = self.cos_cached.bfloat16()
-                self.sin_cached = self.sin_cached.bfloat16()
-        return self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...]
+        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
+        with torch.autocast(device_type=device_type, enabled=False):  # Force float32
+            if seq_len is None:
+                seq_len = x.shape[seq_dim]
+            seq_len = max(seq_len, self.config.training_seqlen)
+            ntk_alpha = self.get_ntk_alpha(seq_len)
+            self.mscale = float(self.get_mscale(seq_len / self.config.training_seqlen))
+            if True:
+                base = self.base * ntk_alpha ** (self.dim / (self.dim - 2))
+                self.inv_freq = 1.0 / (base ** (torch.arange(0, self.dim, 2, device=x.device).float() / self.dim))
+                self.max_seq_len_cached = seq_len
+                t = torch.arange(self.max_seq_len_cached, device=x.device, dtype=self.inv_freq.dtype)
+                freqs = torch.einsum('i,j->ij', t, self.inv_freq)
+                # Different from paper, but it uses a different permutation in order to obtain the same calculation
+                emb = torch.cat((freqs, freqs), dim=-1).to(x.device)
+                if self.precision == torch.bfloat16:
+                    emb = emb.float()
+                # [sx, 1 (b * np), hn]
+                self.cos_cached = self.mscale * emb.cos()[:, None, :]# .hatlf()
+                self.sin_cached = self.mscale * emb.sin()[:, None, :]# .hatlf()
+                if self.precision == torch.bfloat16:
+                    self.cos_cached = self.cos_cached.bfloat16()
+                    self.sin_cached = self.sin_cached.bfloat16()
+                else:
+                    raise NotImplementedError
+            return self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...]
 
 
 # rotary pos emb helpers:
@@ -656,7 +661,8 @@ class SwitchMLP(nn.Module):
         self.num_expert = config.num_moe_experts
         self.hidden_size = config.hidden_size
         self.top_k = config.expert_chosen
-        self.router = nn.Linear(self.hidden_size, self.num_expert, bias=False, dtype=torch.float32)
+        # self.router = nn.Linear(self.hidden_size, self.num_expert, bias=False, dtype=torch.float32)
+        self.router = nn.Linear(self.hidden_size, self.num_expert, bias=False)
         self.local_experts = nn.ModuleList()
         for i in range(self.num_expert):
             self.local_experts.append(TelechatMLP(config))
@@ -780,6 +786,7 @@ class SwitchMLP(nn.Module):
         #     # Gather the logits from the TP region
         #     logits = gather_from_sequence_parallel_region(logits)
         if self.routing_type == "sinkhorn":
+            assert 1==0
             scores, indices = self.sinkhorn_load_balancing(logits)
         elif self.routing_type == "aux_loss":
             scores, indices = self.aux_loss_load_balancing(logits)
@@ -1067,6 +1074,7 @@ class TelechatModel(TelechatPreTrainedModel):
                         hidden_states,
                         causal_mask,
                         layer_past,
+                        use_reentrant=False,
                     )
                 else:
                     outputs = block(
@@ -1108,6 +1116,7 @@ class TelechatModel(TelechatPreTrainedModel):
                         hidden_states,
                         causal_mask,
                         layer_past,
+                        use_reentrant=False,
                     )
                 else:
                     outputs = block(
@@ -1299,6 +1308,7 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
             output_router_logits: Optional[bool] = None,
             return_dict: Optional[bool] = None,
             expert_limit: Optional[int] = None,
+            output_router_bucket_status: Optional[bool] = None,
             **deprecated_arguments,
     ) -> Union[Tuple[torch.Tensor], HWMoECausalLMOutputWithCrossAttentions]:
 
@@ -1334,7 +1344,7 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
                 shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
             )
             # print(f"loss is {loss}")
-        lm_loss = loss.clone().detach()
+        lm_loss = loss.clone().detach() if loss is not None else None
 
         aux_loss = None
         if output_router_logits:
@@ -1362,6 +1372,45 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
 
         # print(f"forward return loss {loss}")
 
+        router_bucket_status = None
+        if output_router_bucket_status:
+            # 初始化一个列表来存储每层的激活专家信息
+            router_bucket_status = []
+
+            # 遍历每一层的router_logits
+            for layer_idx, router_logits in enumerate(transformer_outputs.router_logits):
+
+                router_logits = router_logits[:-1, :]  # last one in each sequence is not used
+                # 获取top-2专家的索引
+                topk_indices = router_logits.topk(2, dim=-1).indices  # (batch_size*seq_len, 2)
+
+                # # 统计每个专家被选中的次数
+                # expert_counts = torch.zeros(router_logits.size(-1), device=router_logits.device)
+                # for expert_idx in topk_indices.view(-1):
+                #     expert_counts[expert_idx] += 1
+
+                # 使用scatter_add_加速统计每个专家被选中的次数
+                expert_counts = torch.zeros(router_logits.size(-1), device=router_logits.device)
+                # 将topk_indices展平并创建值为1的相同形状张量
+                flat_indices = topk_indices.view(-1)
+                ones = torch.ones_like(flat_indices, dtype=torch.float)
+                # 使用scatter_add_进行统计
+                expert_counts.scatter_add_(0, flat_indices, ones)
+
+                # 记录该层的激活信息
+                layer_status = {
+                    "layer_index": layer_idx,
+                    "topk_indices": topk_indices,
+                    "expert_counts": expert_counts,
+                    "most_used_experts": expert_counts.topk(2).indices.tolist()  # 最常使用的两个专家
+                }
+                router_bucket_status.append(layer_status)
+
+            # # 打印简要信息
+            # print(f"Router bucket status for {len(router_bucket_status)} layers:")
+            # for status in router_bucket_status:
+            #     print(f"Layer {status['layer_index']}: Top experts {status['most_used_experts']}")
+
 
         return HWMoECausalLMOutputWithCrossAttentions(
             loss=loss,
@@ -1372,6 +1421,7 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
             attentions=transformer_outputs.attentions,
             lm_loss=lm_loss,
             aux_loss=aux_loss,
+            router_bucket_status=router_bucket_status,
         )
 
     def kd_loss_function(self, output, target_output, temperature):

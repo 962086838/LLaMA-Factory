@@ -609,8 +609,12 @@ class CustomTrainer(Trainer):
                         and self.accelerator.distributed_type != DistributedType.DEEPSPEED
                         else contextlib.nullcontext
                     )
-                    with context():
-                        tr_loss_step, detailed_detached_loss_dict = self.training_step(model, inputs, num_items_in_batch)
+                    if _ % args.apply_hwmoe_training_interval == 0:
+                        with context():
+                            tr_loss_step, detailed_detached_loss_dict = self.training_step(model, inputs, num_items_in_batch, args=args)
+                    else:
+                        with context():
+                            tr_loss_step, detailed_detached_loss_dict = self.training_step(model, inputs, num_items_in_batch, only_update_biggest=True, args=args)
 
                     # create an additional loss logger to record detailed losses
                     if not hasattr(self, 'accumulated_loss_dict'):
@@ -813,7 +817,7 @@ class CustomTrainer(Trainer):
 
     @override
     def training_step(
-            self, model: nn.Module, inputs: dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None
+            self, model: nn.Module, inputs: dict[str, Union[torch.Tensor, Any]], num_items_in_batch=None, only_update_biggest=False, args=None,
     ) -> torch.Tensor:
         model.train()
         if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
@@ -831,28 +835,34 @@ class CustomTrainer(Trainer):
             detailed_losses["lm_loss"] = teacher_outputs.lm_loss.detach()
             detailed_losses["aux_loss"] = teacher_outputs.aux_loss.detach()
 
-            if len(self.multi_forward_expert_list) == 0:
-                total_loss += teacher_loss
+            # if len(self.multi_forward_expert_list) == 0:
+            total_loss += teacher_loss
 
-            # Teacher backward (立即执行)
-            self.accelerator.backward(teacher_loss)
+            # Teacher backward (立即执行):
+            if not args.combine_backward:
+                self.accelerator.backward(teacher_loss)
 
-            # Run student forward passes and compute distillation losses
-            student_outputs = {}
-            for expert_limit in self.multi_forward_expert_list:
-                if expert_limit != self.model.config.num_moe_experts:  # Skip teacher
-                    student_outputs[expert_limit] = self._student_forward_pass(
-                        model, inputs, expert_limit, teacher_outputs
-                    )
-                    total_loss += student_outputs[expert_limit]['loss']
-                    detailed_losses.update({
-                        f"student_{expert_limit}_loss": student_outputs[expert_limit]['loss'].detach(),
-                        f"student_{expert_limit}_hidden_loss": student_outputs[expert_limit]['hidden_loss'].detach(),
-                        f"student_{expert_limit}_kl_loss": student_outputs[expert_limit]['kl_loss'].detach(),
-                    })
+            if not only_update_biggest:
+                # Run student forward passes and compute distillation losses
+                student_outputs = {}
+                for expert_limit in self.multi_forward_expert_list:
+                    if expert_limit != self.model.config.num_moe_experts:  # Skip teacher
+                        student_outputs[expert_limit] = self._student_forward_pass(
+                            model, inputs, expert_limit, teacher_outputs
+                        )
+                        total_loss += student_outputs[expert_limit]['loss']
+                        detailed_losses.update({
+                            f"student_{expert_limit}_lm_loss": student_outputs[expert_limit]['lm_loss'].detach(),
+                            f"student_{expert_limit}_hidden_loss": student_outputs[expert_limit]['hidden_loss'].detach(),
+                            f"student_{expert_limit}_kl_loss": student_outputs[expert_limit]['kl_loss'].detach(),
+                        })
 
-                    # Student backward (立即执行)
-                    self.accelerator.backward(student_outputs[expert_limit]['loss'])
+                        # Student backward (立即执行)
+                        if not args.combine_backward:
+                            self.accelerator.backward(student_outputs[expert_limit]['loss'])
+
+            if args.combine_backward:
+                self.accelerator.backward(total_loss)
 
         # bug fix. when using gradient accumulation, the loss scales for telechat model
         for key, value in detailed_losses.items():
@@ -879,7 +889,7 @@ class CustomTrainer(Trainer):
                 # expert_limit=self.config.num_moe_experts,
                 output_hidden_states=True,  # Need hidden states for distillation
                 return_dict=True,
-                output_router_logits=True
+                output_router_logits=True,
             )
 
     def _student_forward_pass(self, model, inputs, expert_limit, teacher_outputs):

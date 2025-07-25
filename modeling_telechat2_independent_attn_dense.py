@@ -82,39 +82,6 @@ except ImportError:
 
 @dataclass
 class MoECausalLMOutputWithCrossAttentions(ModelOutput):
-    """
-    Base class for causal language model (or autoregressive) outputs.
-
-    Args:
-        loss (`torch.FloatTensor` of shape `(1,)`, *optional*, returned when `labels` is provided):
-            Language modeling loss (for next-token prediction).
-        logits (`torch.FloatTensor` of shape `(batch_size, sequence_length, config.vocab_size)`):
-            Prediction scores of the language modeling head (scores for each vocabulary token before SoftMax).
-        hidden_states (`tuple(torch.FloatTensor)`, *optional*, returned when `output_hidden_states=True` is passed or when `config.output_hidden_states=True`):
-            Tuple of `torch.FloatTensor` (one for the output of the embeddings, if the model has an embedding layer, +
-            one for the output of each layer) of shape `(batch_size, sequence_length, hidden_size)`.
-
-            Hidden-states of the model at the output of each layer plus the optional initial embedding outputs.
-        attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-            sequence_length)`.
-
-            Attentions weights after the attention softmax, used to compute the weighted average in the self-attention
-            heads.
-        cross_attentions (`tuple(torch.FloatTensor)`, *optional*, returned when `output_attentions=True` is passed or when `config.output_attentions=True`):
-            Tuple of `torch.FloatTensor` (one for each layer) of shape `(batch_size, num_heads, sequence_length,
-            sequence_length)`.
-
-            Cross attentions weights after the attention softmax, used to compute the weighted average in the
-            cross-attention heads.
-        past_key_values (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `use_cache=True` is passed or when `config.use_cache=True`):
-            Tuple of `torch.FloatTensor` tuples of length `config.n_layers`, with each tuple containing the cached key,
-            value states of the self-attention and the cross-attention layers if model is used in encoder-decoder
-            setting. Only relevant if `config.is_decoder = True`.
-
-            Contains pre-computed hidden-states (key and values in the attention blocks) that can be used (see
-            `past_key_values` input) to speed up sequential decoding.
-    """
 
     loss: Optional[torch.FloatTensor] = None
     logits: torch.FloatTensor = None
@@ -124,6 +91,23 @@ class MoECausalLMOutputWithCrossAttentions(ModelOutput):
     cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
     lm_loss: Optional[torch.FloatTensor] = None
     aux_loss: Optional[torch.FloatTensor] = None
+
+@dataclass
+class HWMoECausalLMOutputWithCrossAttentions(ModelOutput):
+
+    loss: Optional[torch.FloatTensor] = None
+    logits: torch.FloatTensor = None
+    past_key_values: Optional[Tuple[Tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    last_hidden_states: Optional[Tuple[torch.FloatTensor]] = None
+    attentions: Optional[Tuple[torch.FloatTensor]] = None
+    cross_attentions: Optional[Tuple[torch.FloatTensor]] = None
+    lm_loss: Optional[torch.FloatTensor] = None
+    aux_loss: Optional[torch.FloatTensor] = None
+    hidden_state_loss: Optional[torch.FloatTensor] = None
+    kl_loss: Optional[torch.FloatTensor] = None
+    router_bucket_status: Optional[torch.FloatTensor] = None
+
 
 
 
@@ -243,7 +227,7 @@ class FlashSelfAttention(torch.nn.Module):
         q, k, v = [rearrange(x, 'b s ... -> (b s) ...') for x in [q, k, v]]
         cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
                                     device=q.device)
-        self.training = True
+        # self.training = True
         if self.training:
             # during training q,k,v always have same seqlen
             assert seqlen_k == seqlen_q
@@ -411,7 +395,9 @@ class TelechatAttention(nn.Module):
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.query = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
         self.key_value = nn.Linear(self.hidden_size, self.kv_projection_size * 2, bias=False)
-        self.dense = nn.Linear(self.hidden_size, self.hidden_size)
+        # self.dense = nn.Linear(self.hidden_size, self.hidden_size)
+        self.dense_group = nn.ModuleList([nn.Linear(self.hidden_size, self.hidden_size) for _ in range(len(config.multi_forward_expert_list))])
+        self.multi_forward_expert_list = config.multi_forward_expert_list
         self.attention_dropout = nn.Dropout(config.attention_dropout)
         if self.config.flash_attn:
             self.rotary_emb = RotaryEmbedding(self.head_dim, config=config, precision=torch.bfloat16)
@@ -466,6 +452,7 @@ class TelechatAttention(nn.Module):
             layer_past: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
             use_cache: bool = False,
             output_attentions: bool = False,
+            expert_limit: int = None,
     ):
         hidden_states = hidden_states.transpose(1, 0)
         query_layer = self.query(hidden_states)
@@ -557,7 +544,7 @@ class TelechatAttention(nn.Module):
         # print(self.dense.weight.dtype, context_layer.dtype)
         # assert 1==0
 
-        output_tensor = self.dense(context_layer)
+        output_tensor = self.dense_group[self.multi_forward_expert_list.index(expert_limit)](context_layer)
 
 
 
@@ -816,7 +803,7 @@ class SwitchMLP(nn.Module):
         return scores, indices
 
 
-    def forward(self, hidden_states, residual):
+    def forward(self, hidden_states, residual, expert_limit):
         b = hidden_states.size(0)
         s = hidden_states.size(1)
         h = hidden_states.size(2)
@@ -825,8 +812,14 @@ class SwitchMLP(nn.Module):
         # print(hidden_states.shape)  # torch.Size([batch size, seq length 8193, hidden size 2048])
         router_logits = self.router(hidden_states)
         # print(route.shape)  # torch.Size([batch size, seq length 8193, num experts 16])
-        router_logits = router_logits.view(-1, self.config.num_moe_experts)  # logits = logits.view(-1, self.config.num_moe_experts)
+        if expert_limit is None:
+            router_logits = router_logits.view(-1, self.config.num_moe_experts)  # logits = logits.view(-1, self.config.num_moe_experts)
+        else:
+            expert_mask = torch.arange(self.num_expert) < expert_limit
+            expert_mask = expert_mask.to(router_logits.device)
+            router_logits = router_logits.masked_fill(~expert_mask, float('-inf')).view(-1, self.config.num_moe_experts)
 
+        # print(router_logits.shape)
 
         topk_weights, topk_ind = torch.topk(router_logits, self.top_k, dim=-1)  ##[33,2]. max_ind:[[7,3],[7,2],...]; topk_weight: [[0.4,0.6],[0.5,0.5],...]
         topk_weights = torch.softmax(topk_weights, dim=-1, dtype=torch.float32).type_as(hidden_states)
@@ -839,6 +832,7 @@ class SwitchMLP(nn.Module):
         # topk_ind = topk_ind.view(-1, topk_ind.size(2))
         output_total = torch.zeros_like(hidden_states).to(hidden_states)
         for expert_num, expert in enumerate(self.local_experts):
+            # print(expert_num)
             sample_ind, expert_ind = torch.where(topk_ind == expert_num)
             hidden = hidden_states[sample_ind.unsqueeze(1), :]  ###[chosen_seqlen,1,3072]
             expert_output = expert(hidden)
@@ -874,6 +868,7 @@ class TelechatBlock(nn.Module):
             use_cache: bool = False,
             output_attentions: bool = False,
             output_router_logits: Optional[bool] = False,
+            expert_limit: Optional[int] = None,
     ):
         layernorm_output = self.input_layernorm(hidden_states)
         if self.apply_residual_connection_post_layernorm:
@@ -888,6 +883,7 @@ class TelechatBlock(nn.Module):
             attention_mask=attention_mask,
             use_cache=use_cache,
             output_attentions=output_attentions,
+            expert_limit=expert_limit,
         )
 
         attention_output = attn_outputs[0]
@@ -898,7 +894,7 @@ class TelechatBlock(nn.Module):
             residual = layernorm_output
         else:
             residual = attention_output
-        output = self.mlp(layernorm_output, residual)
+        output = self.mlp(layernorm_output, residual, expert_limit)
         if isinstance(output, tuple):
             output, router_logits = output
         else:
@@ -995,8 +991,11 @@ class TelechatModel(TelechatPreTrainedModel):
             use_cache: Optional[bool] = None,
             output_attentions: Optional[bool] = None,
             output_hidden_states: Optional[bool] = None,
+            output_hidden_states_layer: Optional[int] = None,
             output_router_logits: Optional[bool] = None,
             return_dict: Optional[bool] = None,
+            expert_limit: Optional[int] = None,
+            multi_forward_expert_list: List = [],
             **deprecated_arguments,
     ) -> Union[Tuple[torch.Tensor, ...], BaseModelOutputWithPastAndCrossAttentions]:
 
@@ -1048,46 +1047,96 @@ class TelechatModel(TelechatPreTrainedModel):
             input_shape=(batch_size, seq_length),
             past_key_values_length=past_key_values_length,
         )
+        if expert_limit is None:
+            # print(f"[INFO_Telechat]: word_embeddings_layernorm={hidden_states}")
+            for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
+                if output_hidden_states:
+                    if output_hidden_states_layer is None:
+                        all_hidden_states = all_hidden_states + (hidden_states,)
+                    else:
+                        if i in output_hidden_states_layer:
+                            all_hidden_states = all_hidden_states + (hidden_states,)
+                        else:
+                            all_hidden_states = all_hidden_states + (torch.Tensor([0]),)
 
-        # print(f"[INFO_Telechat]: word_embeddings_layernorm={hidden_states}")
-        for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
-            if output_hidden_states:
-                all_hidden_states = all_hidden_states + (hidden_states,)
+                if self.gradient_checkpointing and self.training:
+                    def create_custom_forward(module):
+                        def custom_forward(*inputs):
+                            # None for past_key_value
+                            return module(*inputs, use_cache=use_cache, output_attentions=output_attentions, output_router_logits=output_router_logits)
 
-            if self.gradient_checkpointing and self.training:
-                def create_custom_forward(module):
-                    def custom_forward(*inputs):
-                        # None for past_key_value
-                        return module(*inputs, use_cache=use_cache, output_attentions=output_attentions, output_router_logits=output_router_logits)
+                        return custom_forward
 
-                    return custom_forward
+                    outputs = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(block),
+                        hidden_states,
+                        causal_mask,
+                        layer_past,
+                        use_reentrant=False,
+                    )
+                else:
+                    outputs = block(
+                        hidden_states,
+                        layer_past=layer_past,
+                        attention_mask=causal_mask,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions,
+                        output_router_logits=output_router_logits,
+                    )
 
-                outputs = torch.utils.checkpoint.checkpoint(
-                    create_custom_forward(block),
-                    hidden_states,
-                    causal_mask,
-                    layer_past,
-                )
-            else:
-                outputs = block(
-                    hidden_states,
-                    layer_past=layer_past,
-                    attention_mask=causal_mask,
-                    use_cache=use_cache,
-                    output_attentions=output_attentions,
-                    output_router_logits=output_router_logits,
-                )
+                # print(f"[INFO_Telechat]: outputs{i}={outputs}")
+                hidden_states = outputs[0]
+                if use_cache is True:
+                    presents = presents + (outputs[1],)
 
-            # print(f"[INFO_Telechat]: outputs{i}={outputs}")
-            hidden_states = outputs[0]
-            if use_cache is True:
-                presents = presents + (outputs[1],)
+                if output_attentions:
+                    all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
 
-            if output_attentions:
-                all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
+                if output_router_logits and outputs[-1] is not None:
+                    all_router_logits += (outputs[-1],)
+        else:
+            # print(f"[INFO_Telechat]: word_embeddings_layernorm={hidden_states}")
+            for i, (block, layer_past) in enumerate(zip(self.h, past_key_values)):
+                if output_hidden_states:
+                    all_hidden_states = all_hidden_states + (hidden_states,)
 
-            if output_router_logits and outputs[-1] is not None:
-                all_router_logits += (outputs[-1],)
+                if self.gradient_checkpointing and self.training:
+                    def create_custom_forward(module):
+                        def custom_forward(*inputs):
+                            # None for past_key_value
+                            return module(*inputs, use_cache=use_cache, output_attentions=output_attentions,
+                                          output_router_logits=output_router_logits, expert_limit=expert_limit)
+
+                        return custom_forward
+
+                    outputs = torch.utils.checkpoint.checkpoint(
+                        create_custom_forward(block),
+                        hidden_states,
+                        causal_mask,
+                        layer_past,
+                        use_reentrant=False,
+                    )
+                else:
+                    outputs = block(
+                        hidden_states,
+                        layer_past=layer_past,
+                        attention_mask=causal_mask,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions,
+                        output_router_logits=output_router_logits,
+                        expert_limit=expert_limit,
+                    )
+
+                # print(f"[INFO_Telechat]: outputs{i}={outputs}")
+                hidden_states = outputs[0]
+                if use_cache is True:
+                    presents = presents + (outputs[1],)
+
+                if output_attentions:
+                    all_self_attentions = all_self_attentions + (outputs[2 if use_cache else 1],)
+
+                if output_router_logits and outputs[-1] is not None:
+                    all_router_logits += (outputs[-1],)
 
         hidden_states = self.ln_f(hidden_states)
         # print(f"[INFO_Telechat]: hidden_states={hidden_states}")
@@ -1116,19 +1165,23 @@ class TelechatModel(TelechatPreTrainedModel):
 
 class Telechat2ForCausalLM(TelechatPreTrainedModel):
     # _tied_weights_keys = ["lm_head.weight"]
-    _keys_to_ignore_on_load_missing = [r"lm_head.weight"]
+    _keys_to_ignore_on_load_missing = [r"lm_head_group.weight"]
 
     def __init__(self, config: Telechat2Config):
         super().__init__(config)
+        self.config = config
         self.transformer = TelechatModel(config)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
+        self.lm_head_group = nn.ModuleList([nn.Linear(config.hidden_size, config.vocab_size, bias=False) for _ in range(len(config.multi_forward_expert_list))])
         self.post_init()
         self.moe_aux_loss_coeff = config.moe_aux_loss_coeff
+        self.multi_forward_expert_list = config.multi_forward_expert_list
 
     def get_output_embeddings(self):
+        assert 1==0
         return self.lm_head
 
     def set_output_embeddings(self, new_embeddings: torch.Tensor):
+        assert 1==0
         self.lm_head = new_embeddings
 
     def prepare_inputs_for_generation(
@@ -1167,8 +1220,9 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
             output_hidden_states: Optional[bool] = None,
             output_router_logits: Optional[bool] = None,
             return_dict: Optional[bool] = None,
+            expert_limit: Optional[int] = None,
             **deprecated_arguments,
-    ) -> Union[Tuple[torch.Tensor], MoECausalLMOutputWithCrossAttentions]:
+    ) -> Union[Tuple[torch.Tensor], HWMoECausalLMOutputWithCrossAttentions]:
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         output_router_logits = (
@@ -1186,9 +1240,100 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
             output_hidden_states=output_hidden_states,
             output_router_logits=output_router_logits,
             return_dict=return_dict,
+            expert_limit=self.config.num_moe_experts,
         )
-        hidden_states = transformer_outputs[0]
-        lm_logits = self.lm_head(hidden_states)
+        hidden_states = transformer_outputs.last_hidden_state
+        lm_logits = self.lm_head_group[self.config.multi_forward_expert_list.index(self.config.num_moe_experts)](hidden_states)
+
+        loss = None
+        if labels is not None:
+            labels = labels.to(lm_logits.device)
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            batch_size, seq_length, vocab_size = shift_logits.shape
+            loss_fct = CrossEntropyLoss()
+            loss = loss_fct(
+                shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
+            )
+            # print(f"loss is {loss}")
+
+        lm_loss = loss.clone().detach() if loss is not None else None
+
+        aux_loss = None
+        if output_router_logits and self.training:
+            aux_loss = load_balancing_loss_func(
+                transformer_outputs.router_logits if return_dict else transformer_outputs[-1],
+                self.config.num_moe_experts,
+                self.config.expert_chosen,
+                attention_mask,
+            )
+            # print(f"aux loss is {aux_loss}")
+
+            if labels is not None:
+                loss += self.moe_aux_loss_coeff * aux_loss.to(loss.device)  # make sure to reside in the same device
+                # print(f"After add, loss is {loss}")
+
+
+        if not return_dict:
+            assert 1==0
+            output = (lm_logits,) + transformer_outputs[1:]
+            if output_router_logits:
+                output = (aux_loss,) + output
+            return ((loss,) + output) if loss is not None else output
+
+        # assert 1==0
+
+        # print(f"forward return loss {loss}")
+
+
+        return HWMoECausalLMOutputWithCrossAttentions(
+            loss=loss,
+            logits=lm_logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            last_hidden_states = hidden_states,
+            attentions=transformer_outputs.attentions,
+            lm_loss=lm_loss,
+            aux_loss=aux_loss,
+        )
+
+    def single_forward_with_expert_limit(
+            self,
+            input_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[Tuple[Tuple[torch.Tensor, torch.Tensor], ...]] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+            labels: Optional[torch.Tensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            output_router_logits: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+            expert_limit: Optional[int] = None,
+            output_router_bucket_status: Optional[bool] = None,
+            **deprecated_arguments,
+    ) -> Union[Tuple[torch.Tensor], HWMoECausalLMOutputWithCrossAttentions]:
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_router_logits = (
+            output_router_logits if output_router_logits is not None else self.config.output_router_logits
+        )
+
+
+        transformer_outputs = self.transformer(
+            input_ids,
+            past_key_values=past_key_values,
+            attention_mask=attention_mask,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            output_router_logits=output_router_logits,
+            return_dict=return_dict,
+            expert_limit=expert_limit,
+        )
+        hidden_states = transformer_outputs.last_hidden_state
+        lm_logits = self.lm_head_group[self.config.multi_forward_expert_list.index(expert_limit)](hidden_states)
 
         loss = None
         if labels is not None:
@@ -1215,9 +1360,6 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
 
             if labels is not None:
                 loss += self.moe_aux_loss_coeff * aux_loss.to(loss.device)  # make sure to reside in the same device
-
-
-
                 # print(f"After add, loss is {loss}")
 
 
@@ -1232,13 +1374,224 @@ class Telechat2ForCausalLM(TelechatPreTrainedModel):
 
         # print(f"forward return loss {loss}")
 
+        router_bucket_status = None
+        if output_router_bucket_status:
+            # 初始化一个列表来存储每层的激活专家信息
+            router_bucket_status = []
 
-        return MoECausalLMOutputWithCrossAttentions(
+            # 遍历每一层的router_logits
+            for layer_idx, router_logits in enumerate(transformer_outputs.router_logits):
+
+                router_logits = router_logits[:-1, :]  # last one in each sequence is not used
+                # 获取top-2专家的索引
+                topk_indices = router_logits.topk(2, dim=-1).indices  # (batch_size*seq_len, 2)
+
+                # # 统计每个专家被选中的次数
+                # expert_counts = torch.zeros(router_logits.size(-1), device=router_logits.device)
+                # for expert_idx in topk_indices.view(-1):
+                #     expert_counts[expert_idx] += 1
+
+                # 使用scatter_add_加速统计每个专家被选中的次数
+                expert_counts = torch.zeros(router_logits.size(-1), device=router_logits.device)
+                # 将topk_indices展平并创建值为1的相同形状张量
+                flat_indices = topk_indices.view(-1)
+                ones = torch.ones_like(flat_indices, dtype=torch.float)
+                # 使用scatter_add_进行统计
+                expert_counts.scatter_add_(0, flat_indices, ones)
+
+                # 记录该层的激活信息
+                layer_status = {
+                    "layer_index": layer_idx,
+                    "topk_indices": topk_indices,
+                    "expert_counts": expert_counts,
+                    "most_used_experts": expert_counts.topk(2).indices.tolist()  # 最常使用的两个专家
+                }
+                router_bucket_status.append(layer_status)
+
+            # # 打印简要信息
+            # print(f"Router bucket status for {len(router_bucket_status)} layers:")
+            # for status in router_bucket_status:
+            #     print(f"Layer {status['layer_index']}: Top experts {status['most_used_experts']}")
+
+
+        return HWMoECausalLMOutputWithCrossAttentions(
             loss=loss,
+            logits=lm_logits,
+            past_key_values=transformer_outputs.past_key_values,
+            hidden_states=transformer_outputs.hidden_states,
+            last_hidden_states=hidden_states,
+            attentions=transformer_outputs.attentions,
+            lm_loss=lm_loss,
+            aux_loss=aux_loss,
+            router_bucket_status=router_bucket_status,
+        )
+
+    def kd_loss_function(self, output, target_output, temperature):
+        """Compute kd loss"""
+        """
+        para: output: middle ouptput logits.
+        para: target_output: final output has divided by temperature and softmax.
+        """
+
+        output = output / temperature
+        output_log_softmax = torch.log_softmax(output, dim=1)
+        loss_kd = -torch.mean(torch.sum(output_log_softmax * target_output, dim=1))
+        return loss_kd
+
+    def multi_forward_with_expert_list(
+            self,
+            input_ids: Optional[torch.LongTensor] = None,
+            past_key_values: Optional[Tuple[Tuple[torch.Tensor, torch.Tensor], ...]] = None,
+            attention_mask: Optional[torch.Tensor] = None,
+            inputs_embeds: Optional[torch.Tensor] = None,
+            labels: Optional[torch.Tensor] = None,
+            use_cache: Optional[bool] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            output_router_logits: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
+
+            **deprecated_arguments,
+    ) -> Union[Tuple[torch.Tensor], HWMoECausalLMOutputWithCrossAttentions]:
+
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_router_logits = (
+            output_router_logits if output_router_logits is not None else self.config.output_router_logits
+        )
+
+        multi_forward_result = {}
+
+        for expert_limit in self.multi_forward_expert_list:
+            transformer_outputs = self.transformer(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
+                output_hidden_states=True and self.config.distill_all_hidden_states,
+                output_hidden_states_layer=self.config.output_hidden_states_layer,
+                output_router_logits=output_router_logits,
+                return_dict=True,
+                expert_limit=expert_limit,
+            )
+            multi_forward_result[expert_limit] = transformer_outputs
+
+
+        # For every combination of experts, we calculate the language model loss
+        final_loss = 0
+        lm_loss = {}
+        hidden_state_losses = {}
+        kl_losses = {}
+
+        # Get the full expert model outputs as teacher
+        teacher_expert_limit = self.config.num_moe_experts
+        teacher_all_results = multi_forward_result[teacher_expert_limit]
+        teacher_last_hidden_state = teacher_all_results.last_hidden_state
+        teacher_middle_hidden_states = teacher_all_results.hidden_states[:-1] if teacher_all_results.hidden_states is not None else None
+        teacher_logits = None
+
+        for expert_limit in self.multi_forward_expert_list[::-1]:
+
+            last_hidden_states = multi_forward_result[expert_limit].last_hidden_state
+            all_hidden_states = multi_forward_result[expert_limit].hidden_states[:-1] if multi_forward_result[expert_limit].hidden_states is not None else None  # Note: the last one equals to transformer_outputs.last_hidden_state
+            lm_logits = self.lm_head_group[self.multi_forward_expert_list.index(expert_limit)](last_hidden_states)
+            if expert_limit == teacher_expert_limit:
+                teacher_logits = lm_logits
+                shift_teacher_logits = teacher_logits[..., :-1, :].contiguous()
+            # print(f"expert_limit {expert_limit} teacher_logits is {teacher_logits}")
+
+            if labels is not None:
+                labels = labels.to(lm_logits.device)
+                shift_logits = lm_logits[..., :-1, :].contiguous()
+                shift_labels = labels[..., 1:].contiguous()
+                batch_size, seq_length, vocab_size = shift_logits.shape
+                loss_fct = CrossEntropyLoss()
+                loss = loss_fct(
+                    shift_logits.view(batch_size * seq_length, vocab_size), shift_labels.view(batch_size * seq_length)
+                )
+                lm_loss[f"lm_loss_{expert_limit}"] = loss.clone().detach().cpu()
+                final_loss += loss
+
+            # 2. Hidden state loss (feature distillation)
+            if expert_limit != teacher_expert_limit:
+                # Distill all hidden states or just the last one
+                if self.config.distill_all_hidden_states:
+                    assert 1==0
+                    assert len(all_hidden_states) == len(teacher_middle_hidden_states)
+                    hidden_loss = 0
+                    for stu_hid, tea_hid in zip(all_hidden_states, teacher_middle_hidden_states):
+                        hidden_loss += F.mse_loss(stu_hid, tea_hid.detach())
+                else:
+                    hidden_loss = F.mse_loss(last_hidden_states, teacher_last_hidden_state)
+
+                hidden_state_losses[f"hidden_loss_{expert_limit}"] = hidden_loss.clone().detach().cpu()
+                final_loss += self.config.hidden_loss_weight * hidden_loss
+
+            del all_hidden_states, last_hidden_states
+
+            # 3. KL divergence loss (output distillation)
+            if expert_limit != teacher_expert_limit:
+                # Shift tokens for teacher and student logits
+                # shift_student_logits = shift_logits
+
+                # Temperature scaling
+                teacher_probs = F.softmax(shift_teacher_logits / self.config.temperature, dim=-1)
+
+                # print(f"expert limit {expert_limit}")
+                kl_loss = self.kd_loss_function(shift_logits, teacher_probs.detach(), temperature=self.config.temperature) * (self.config.temperature ** 2)
+
+                kl_losses[f"kl_loss_{expert_limit}"] = kl_loss.clone().detach().cpu()
+                final_loss += self.config.kl_loss_weight * kl_loss
+
+
+        del teacher_all_results, teacher_last_hidden_state
+        # print("lm loss", lm_loss)
+        # print("hidden_state_loss", hidden_state_losses)
+        # print("kl_losses", kl_losses)
+
+
+
+        # hidden state loss
+
+        # KL penalty
+
+        # Router logits only for the full router case
+        aux_loss = None
+        if output_router_logits:
+            aux_loss = load_balancing_loss_func(
+                multi_forward_result[self.config.num_moe_experts].router_logits, # if return_dict else transformer_outputs[-1],
+                self.config.num_moe_experts,
+                self.config.expert_chosen,
+                attention_mask,
+            )
+            # print(f"aux loss is {aux_loss}")
+
+            if labels is not None:
+                final_loss += self.moe_aux_loss_coeff * aux_loss.to(final_loss.device)  # make sure to reside in the same device
+                # print(f"After add, loss is {loss}")
+
+
+        if not return_dict:
+            assert 1==0
+            # output = (lm_logits,) + transformer_outputs[1:]
+            # if output_router_logits:
+            #     output = (aux_loss,) + output
+            # return ((loss,) + output) if loss is not None else output
+
+        # assert 1==0
+
+        # print(f"forward return loss {loss}")
+
+
+        return HWMoECausalLMOutputWithCrossAttentions(
+            loss=final_loss,
             logits=lm_logits,
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
             lm_loss=lm_loss,
             aux_loss=aux_loss,
+            hidden_state_loss=hidden_state_losses,
+            kl_loss=kl_losses
         )

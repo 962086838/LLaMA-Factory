@@ -640,6 +640,8 @@ class CustomTrainer(Trainer):
                                     raise ValueError(
                                         f"Calculated loss must be on the original device: {detailed_detached_loss_dict[key].device} but device in use is {self.accumulated_loss_dict[key].device}"
                                     )
+                                # print(detailed_detached_loss_dict[key])
+                                # print(self.accumulated_loss_dict[key])
                                 self.accumulated_loss_dict[key] += detailed_detached_loss_dict[key]
                             elif isinstance(detailed_detached_loss_dict[key], dict):
                                 assert isinstance(self.accumulated_loss_dict[key], dict), f"key {key}, detailed_detached_loss_dict[key] type {type(detailed_detached_loss_dict[key])}, self.accumulated_loss_dict type {type(self.accumulated_loss_dict[key])}"
@@ -942,6 +944,9 @@ class CustomTrainer(Trainer):
         if isinstance(self.model.multi_forward_expert_list, list) and len(self.model.multi_forward_expert_list) > 1:
             outputs = model.multi_forward_with_expert_list(**inputs)
         else:
+            torch.set_printoptions(threshold=float('inf'))  # 或者设为一个很大的数，如 10000
+            print(inputs["input_ids"])
+            assert 1 == 0
             outputs = model(**inputs)
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
@@ -972,7 +977,7 @@ class CustomTrainer(Trainer):
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
             # print(outputs)
             # assert 1==0
-            keys_to_remove = {'loss', 'logits', 'past_key_values', 'hidden_states', 'attentions'}
+            keys_to_remove = {'loss', 'logits', 'past_key_values', 'hidden_states', 'attentions', 'last_hidden_states'}
             outputs = {k: v for k, v in outputs.items() if k not in keys_to_remove}
             additional_detailed_loss = outputs
             # print(additional_detailed_loss.keys())  # dict_keys(['lm_loss', 'aux_loss', 'hidden_state_loss', 'kl_loss'])
