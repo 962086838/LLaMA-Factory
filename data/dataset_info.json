@@ -694,6 +694,176 @@
       "prompt": "text"
     }
   },
+  "fineweb_edu_10b": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/data/fineweb_edu_10b_clean",
+    "subset": "sample-10BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b": {
+    "hf_hub_url": "HuggingFaceFW/fineweb-edu",
+    "ms_hub_url": "AI-ModelScope/fineweb-edu",
+    "file_name": "fineweb_edu_100b/sample-100BT",
+    "subset": "sample-100BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part1": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_1",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part2": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_2",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part3": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_3",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part4": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_4",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part5": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_5",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part6": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_6",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part7": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_7",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part8": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_8",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part9": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_9",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part10": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_10",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part11": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_11",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part12": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_12",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part13": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_13",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part14": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_14",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part15": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_15",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part16": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_16",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part17": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_17",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part18": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_18",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part19": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_19",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_part20": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_part_20",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_350b_partial": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_350B_partial",
+    "subset": "sample-350BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
   "cci3_hq": {
     "hf_hub_url": "BAAI/CCI3-HQ",
     "columns": {

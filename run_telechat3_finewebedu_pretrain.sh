@@ -1,0 +1,1 @@
+HF_DATASETS_CACHE="./huggingface_cache" USE_MODELSCOPE_HUB=1 DISABLE_VERSION_CHECK=1 llamafactory-cli train examples/train_full/telechat3_pt_cpu_350B.yaml
