@@ -3,10 +3,10 @@ HF_DATASETS_CACHE="./huggingface_cache" USE_MODELSCOPE_HUB=1 DISABLE_VERSION_CHE
     --stage pt \
     --do_train \
     --train_from_scratch \
-    --model_name_or_path Telechat3-1p8B \
+    --model_name_or_path Telechat3-1p8B-mhyperconnection \
     --dataset fineweb_edu_350b \
     --finetuning_type full \
-    --output_dir saves/telechat3-1p8b/pt/fineweb-edu-350b \
+    --output_dir saves/telechat3-1p8b-mhc/pt/fineweb-edu-350b \
     --overwrite_cache \
     --per_device_train_batch_size 16 \
     --gradient_accumulation_steps 2 \
