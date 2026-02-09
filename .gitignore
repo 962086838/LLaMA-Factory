@@ -183,3 +183,8 @@ generated_predictions.jsonl
 predictions_score.json
 
 sync_config.jsonc
+/mHC-manifold-constrained-hyper-connections
+/mHC.cu-main
+/telechat-mhc-kernel
+/Telechat3-1p8B-mhyperconnection
+/Telechat3-1p8B-mHC
