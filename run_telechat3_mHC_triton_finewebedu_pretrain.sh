@@ -1,0 +1,28 @@
+HF_DATASETS_CACHE="./huggingface_cache" USE_MODELSCOPE_HUB=1 DISABLE_VERSION_CHECK=1 deepspeed src/train.py \
+    --deepspeed examples/deepspeed/ds_z2_config.json \
+    --stage pt \
+    --do_train \
+    --train_from_scratch \
+    --model_name_or_path Telechat3-1p8B-mHC-triton \
+    --dataset fineweb_edu_350b \
+    --finetuning_type full \
+    --output_dir saves/telechat3-1p8b-mhc-triton/pt/fineweb-edu-350b \
+    --overwrite_cache \
+    --per_device_train_batch_size 8 \
+    --gradient_accumulation_steps 4 \
+    --lr_scheduler_type cosine \
+    --logging_steps 10 \
+    --save_steps 5000 \
+    --learning_rate 1.0e-4 \
+    --num_train_epochs 1.0 \
+    --plot_loss \
+    --preprocessing_num_workers 16 \
+    --bf16 \
+    --cutoff_len 4096 \
+    --tokenized_path tokenized_path/fineweb_edu_350b_merged \
+    --trust_remote_code \
+    --flash_attn fa2 \
+    --report_to wandb \
+    --warmup_ratio 0.01 \
+    --run_name telechat3-1p8b-mhc-triton-residual-4-pt-fineweb-edu-350b 
+    

@@ -188,3 +188,6 @@ sync_config.jsonc
 /telechat-mhc-kernel
 /Telechat3-1p8B-mhyperconnection
 /Telechat3-1p8B-mHC
+/Telechat3-1p8B-mHC-pytorch
+/mHC-triton
+/Telechat3-1p8B-mHC-triton
