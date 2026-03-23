@@ -1,0 +1,43 @@
+### model
+model_name_or_path: DeepseekV32-small
+trust_remote_code: true
+train_from_scratch: true
+
+### method
+stage: pt
+do_train: true
+finetuning_type: full
+# deepspeed: examples/deepspeed/ds_z2_config.json
+
+### dataset
+dataset: fineweb_edu_100b_local
+cutoff_len: 4096
+# max_samples: 1000
+overwrite_cache: false
+tokenized_path: tokenized_path/fineweb_edu_100b_deepseekv32
+preprocessing_num_workers: 96
+
+### output
+output_dir: saves/deepseekv32/pt/fineweb-edu-100b-cpu
+logging_steps: 1
+save_steps: 100
+plot_loss: true
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+learning_rate: 1.0e-5
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: false
+fp16: false
+flash_attn: fa2
+use_cpu: true
+
+### eval
+val_size: 0.01
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 100

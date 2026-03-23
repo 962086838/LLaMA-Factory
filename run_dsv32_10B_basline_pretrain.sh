@@ -1,0 +1,25 @@
+HF_DATASETS_CACHE="./huggingface_cache" USE_MODELSCOPE_HUB=1 DISABLE_VERSION_CHECK=1  deepspeed --hostfile hostfile_16machine src/train.py \
+    --deepspeed examples/deepspeed/ds_z2_config.json \
+    --stage pt \
+    --do_train \
+    --train_from_scratch \
+    --model_name_or_path DeepseekV32-10B-baseline \
+    --dataset fineweb_edu_350b \
+    --finetuning_type full \
+    --output_dir saves/deepseekv32-10B-baseline/pt/fineweb_edu_350b \
+    --overwrite_cache \
+    --per_device_train_batch_size 2 \
+    --gradient_accumulation_steps 3 \
+    --lr_scheduler_type cosine \
+    --logging_steps 1 \
+    --save_steps 5000 \
+    --learning_rate 1.0e-5 \
+    --warmup_steps 100 \
+    --num_train_epochs 1.0 \
+    --plot_loss \
+    --preprocessing_num_workers 32 \
+    --tokenized_path /gfs/space/private/hehaowei/LLaMA-Factory/tokenized_path/fineweb_edu_350b_deepseekv32_merged \
+    --bf16 \
+    --cutoff_len 4096 \
+    --trust_remote_code \
+    --flash_attn fa2

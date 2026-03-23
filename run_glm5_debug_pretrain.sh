@@ -1,0 +1,25 @@
+HF_DATASETS_CACHE="./huggingface_cache" USE_MODELSCOPE_HUB=1 DISABLE_VERSION_CHECK=1 deepspeed src/train.py \
+    --deepspeed examples/deepspeed/ds_z3_config.json \
+    --stage pt \
+    --do_train \
+    --train_from_scratch \
+    --model_name_or_path GLM5-small-debug \
+    --dataset fineweb_edu_10b \
+    --finetuning_type full \
+    --output_dir saves/glm5-small-debug/pt/fineweb_edu_10b \
+    --overwrite_cache \
+    --per_device_train_batch_size 1 \
+    --gradient_accumulation_steps 2 \
+    --lr_scheduler_type cosine \
+    --logging_steps 10 \
+    --save_steps 500 \
+    --learning_rate 1.0e-5 \
+    --warmup_steps 100 \
+    --num_train_epochs 1.0 \
+    --plot_loss \
+    --preprocessing_num_workers 32 \
+    --tokenized_path tokenized_path/fineweb_edu_10b_glm5_small \
+    --bf16 \
+    --cutoff_len 1024 \
+    --trust_remote_code \
+    --flash_attn sdpa

@@ -704,8 +704,134 @@
   "fineweb_edu_100b": {
     "hf_hub_url": "HuggingFaceFW/fineweb-edu",
     "ms_hub_url": "AI-ModelScope/fineweb-edu",
-    "file_name": "fineweb_edu_100b/sample-100BT",
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B",
     "subset": "sample-100BT",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part1": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_1",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part2": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_2",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part3": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_3",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part4": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_4",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part5": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_5",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part6": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_6",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part7": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_7",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part8": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_8",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part9": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_9",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part10": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_10",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part11": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_11",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part12": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_12",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part13": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_13",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part14": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_14",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part15": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_15",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part16": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_16",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part17": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_17",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part18": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_18",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part19": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_19",
+    "columns": {
+      "prompt": "text"
+    }
+  },
+  "fineweb_edu_100b_local_part20": {
+    "file_name": "/gfs/space/private/hehaowei/LLaMA-Factory/fineweb_data_100B_part_20",
     "columns": {
       "prompt": "text"
     }

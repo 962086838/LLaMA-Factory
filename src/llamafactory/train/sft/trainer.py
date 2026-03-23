@@ -148,6 +148,18 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         return super()._get_train_sampler(*args, **kwargs)
 
     @override
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        # 动态更新 bias_update_gamma 使其与学习率成比例
+        # bias_update_gamma = current_lr * bias_update_lr_ratio
+        unwrapped = self.accelerator.unwrap_model(model)
+        if hasattr(unwrapped, "config") and getattr(unwrapped.config, "bias_update_lr_ratio", None) is not None:
+            ratio = unwrapped.config.bias_update_lr_ratio
+            if self.lr_scheduler is not None:
+                current_lr = self.lr_scheduler.get_last_lr()[0]
+                unwrapped.config.bias_update_gamma = current_lr * ratio
+        return super().training_step(model, inputs, num_items_in_batch)
+
+    @override
     def compute_loss(self, model, inputs, *args, **kwargs):
         if self.finetuning_args.use_asft_loss:
             with torch.no_grad():

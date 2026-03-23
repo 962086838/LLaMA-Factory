@@ -1,0 +1,13 @@
+noicse jitter 1000 step up 1000 step off
+jitter noise effect ablation study
+moe e_score_correction_bias
+
+
+
+6B 100B zero2 batch=2 2machine {"current_steps": 30, "total_steps": 243242, "loss": 11.54456615447998, "lr": 2.9e-06, "epoch": 0.0001233341327212306, "percentage": 0.01, "elapsed_time": "0:06:07", "remaining_time": "34 days, 12:26:10"}
+6B 100B zero2 batch=4 2machine OOM
+6B 100B zero2 batch=4 4machine OOM
+6B 100B zero2 batch=2 4machine {"current_steps": 30, "total_steps": 121621, "loss": 11.52501106262207, "lr": 2.9e-06, "epoch": 0.00024666792741385123, "percentage": 0.02, "elapsed_time": "0:06:32", "remaining_time": "18 days, 9:20:33"}
+6B 100B zero3 batch=2 4machine {"current_steps": 30, "total_steps": 121621, "loss": 11.555950164794922, "lr": 2.9e-06, "epoch": 0.00024666792741385123, "percentage": 0.02, "elapsed_time": "0:03:49", "remaining_time": "10 days, 18:19:22"}
+
+

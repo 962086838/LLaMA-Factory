@@ -45,6 +45,44 @@ from mcore_adapter.trainer import McaTrainer
 from mcore_adapter.trainer.dpo_config import DPOConfig
 
 
+class CustomMcaTrainer(McaTrainer):
+    """McaTrainer subclass that dynamically updates bias_update_gamma based on learning rate."""
+
+    def training_step(self, models, data_iterator, seq_length):
+        # 动态更新 bias_update_gamma 使其与学习率成比例
+        # bias_update_gamma = current_lr * bias_update_lr_ratio
+        config = self.model.config
+        
+        bias_ratio = getattr(config, "bias_update_lr_ratio", None)
+        
+        # If it's an McaModelConfig, hparams are sometimes buried in _hf_config_dict or similar 
+        # based on how mcore_adapter wraps it. Try another fallback if None:
+        if bias_ratio is None and hasattr(config, "hf_config_json"):
+            import json
+            try:
+                hf_cfg = json.loads(config.hf_config_json)
+                bias_ratio = hf_cfg.get("bias_update_lr_ratio", None)
+            except Exception:
+                pass
+        
+        if bias_ratio is not None:
+            try:
+                current_lr = self._get_learning_rate()
+                config.moe_router_bias_update_rate = current_lr * bias_ratio
+            except Exception:
+                pass
+        return super().training_step(models, data_iterator, seq_length)
+
+    def log(self, logs: dict[str, float]) -> None:
+        """
+        Log `logs` on the various objects watching training.
+        """
+        config = getattr(self.model, "config", None)
+        if config is not None and hasattr(config, "moe_router_bias_update_rate"):
+            logs["bias_update_rate"] = config.moe_router_bias_update_rate
+        super().log(logs)
+
+
 if TYPE_CHECKING:
     from mcore_adapter.training_args import Seq2SeqTrainingArguments as McaSeq2SeqTrainingArguments
     from transformers import TrainerCallback
@@ -128,6 +166,11 @@ def run_pt(
     data_args.cutoff_len -= 1
 
     _check_model_support(model_args)
+    
+    from .monkey_patch import apply_mcore_patch
+    apply_mcore_patch()
+
+    print(training_args)
     model = AutoModel.from_pretrained(model_args.model_name_or_path, training_args)
     data_collator = DataCollatorForSeq2Seq(
         tokenizer=tokenizer,
@@ -136,7 +179,7 @@ def run_pt(
     )
     data_collator = _data_collator_wrapper(data_collator)
 
-    trainer = McaTrainer(
+    trainer = CustomMcaTrainer(
         model=model,
         args=training_args,
         tokenizer=tokenizer,
